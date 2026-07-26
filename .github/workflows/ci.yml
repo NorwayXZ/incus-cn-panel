@@ -13,6 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Shell syntax
-        run: bash -n bootstrap.sh install.sh uninstall.sh
+        run: bash -n bootstrap.sh bootstrap-node.sh install.sh install-node.sh uninstall.sh uninstall-node.sh
       - name: Python tests
         run: python3 -m unittest discover -s tests -v

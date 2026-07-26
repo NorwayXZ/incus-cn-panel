@@ -33,10 +33,10 @@ fi
 [[ "$PANEL_USER" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || die "PANEL_USER 只能包含字母、数字、下划线和连字符。"
 
 free_kb=$(df -Pk / | awk 'NR==2 {print $4}')
-if (( free_kb < 1572864 )) && ! command -v incus >/dev/null 2>&1; then
-  die "根分区可用空间不足 1.5 GiB，无法安全安装。"
-elif (( free_kb < 5242880 )); then
-  warn "根分区可用空间少于 5 GiB，只建议用于功能验证。"
+if (( free_kb < 262144 )); then
+  die "根分区可用空间不足 256 MiB，无法安全安装控制面板。"
+elif (( free_kb < 1048576 )); then
+  warn "根分区可用空间少于 1 GiB。"
 fi
 
 if ss -lntH "sport = :${PANEL_PORT}" 2>/dev/null | grep -q .; then
@@ -66,59 +66,15 @@ Architectures: ${arch}
 Signed-By: /etc/apt/keyrings/zabbly.asc
 EOF
   apt-get update
-  apt-get install -y incus
+  apt-get install -y incus-client
 else
-  log "检测到 Incus，保留现有安装"
-fi
-
-systemctl enable --now incus.service
-for _ in {1..30}; do
-  incus version >/dev/null 2>&1 && break
-  sleep 1
-done
-incus version >/dev/null 2>&1 || die "Incus 服务未能正常启动。"
-
-if ! incus storage show default >/dev/null 2>&1; then
-  log "初始化 dir 存储池、NAT 网桥和默认配置"
-  incus admin init --preseed <<'EOF'
-config: {}
-networks:
-- config:
-    ipv4.address: auto
-    ipv4.nat: "true"
-    ipv6.address: auto
-    ipv6.nat: "true"
-  description: Incus managed NAT bridge
-  name: incusbr0
-  type: bridge
-storage_pools:
-- config: {}
-  description: Local directory storage
-  name: default
-  driver: dir
-profiles:
-- config: {}
-  description: Default Incus profile
-  devices:
-    eth0:
-      name: eth0
-      network: incusbr0
-      type: nic
-    root:
-      path: /
-      pool: default
-      type: disk
-  name: default
-projects: []
-cluster: null
-EOF
-else
-  log "检测到现有 Incus 存储池，不改动当前初始化配置"
+  log "检测到 Incus 客户端，保留现有安装"
 fi
 
 log "安装中文管理面板"
 install -d -m 0755 "$APP_DIR"
 install -d -m 0700 "$CONFIG_DIR"
+install -d -m 0700 "$CONFIG_DIR/incus-client"
 install -m 0755 "$SCRIPT_DIR/app.py" "$APP_DIR/app.py"
 install -m 0755 "$SCRIPT_DIR/uninstall.sh" /usr/local/sbin/incus-cn-panel-uninstall
 install -m 0644 "$SCRIPT_DIR/incus-cn-panel.service" /etc/systemd/system/incus-cn-panel.service
@@ -160,6 +116,7 @@ PANEL_HOST=0.0.0.0
 PANEL_PORT=${PANEL_PORT}
 TLS_CERT=${CONFIG_DIR}/panel.crt
 TLS_KEY=${CONFIG_DIR}/panel.key
+INCUS_CONF=${CONFIG_DIR}/incus-client
 EOF
   chmod 0600 "$CONFIG_DIR/config.env"
 
@@ -171,6 +128,11 @@ EOF
 EOF
   chmod 0600 /root/incus-cn-panel-credentials.txt
 fi
+
+if ! grep -q '^INCUS_CONF=' "$CONFIG_DIR/config.env"; then
+  printf 'INCUS_CONF=%s/incus-client\n' "$CONFIG_DIR" >> "$CONFIG_DIR/config.env"
+fi
+INCUS_CONF="$CONFIG_DIR/incus-client" incus remote list >/dev/null
 
 systemctl daemon-reload
 systemctl enable --now incus-cn-panel.service
@@ -186,4 +148,4 @@ fi
 
 log "安装完成"
 cat /root/incus-cn-panel-credentials.txt
-warn "Incus 实例和镜像会占用较多磁盘，请先确认宿主机资源。"
+log "请在计算节点运行 install-node.sh，使用生成的 Trust Token 在 Web 面板中接入节点。"

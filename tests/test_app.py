@@ -2,6 +2,7 @@ import hashlib
 import os
 import sys
 import unittest
+from unittest import mock
 
 
 os.environ.setdefault("PANEL_PASSWORD_SALT", "test-salt")
@@ -48,9 +49,70 @@ class ValidationTests(unittest.TestCase):
             app.PASSWORD_SALT, app.PASSWORD_HASH, app.PASSWORD_ITERATIONS = old_values
 
     def test_chinese_ui_and_relative_api_base(self):
-        self.assertIn("Incus 中文管理面板", app.HTML)
+        self.assertIn("Incus 中文集群面板", app.HTML)
         self.assertIn("location.pathname", app.HTML)
         self.assertIn("apiBase + path", app.HTML)
+
+    def test_normalize_node_address(self):
+        self.assertEqual(
+            app.normalize_address("203.0.113.10"),
+            "https://203.0.113.10:8443",
+        )
+        self.assertEqual(
+            app.normalize_address("https://node.example.com:9443/"),
+            "https://node.example.com:9443",
+        )
+        self.assertEqual(
+            app.normalize_address("2001:db8::10"),
+            "https://[2001:db8::10]:8443",
+        )
+        for invalid in ("http://node.example.com", "https://user@node.example.com", "https://node.example.com/path"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                app.normalize_address(invalid)
+
+    @mock.patch("app.run_incus")
+    def test_registered_remotes_only_returns_private_incus_nodes(self, run_incus):
+        run_incus.return_value = '''{
+            "local": {"Protocol": "incus", "Public": false},
+            "images": {"Protocol": "simplestreams", "Public": true},
+            "node-hk-01": {"Protocol": "incus", "Public": false}
+        }'''
+        self.assertEqual(
+            app.registered_remotes(),
+            {"node-hk-01": {"Protocol": "incus", "Public": False}},
+        )
+
+    @mock.patch("app.registered_remotes", return_value={})
+    @mock.patch("app.run_incus")
+    def test_add_remote_uses_token_before_setting_explicit_url(self, run_incus, _):
+        app.add_remote(
+            "node-hk-01",
+            "https://203.0.113.10:8443",
+            "one-time-trust-token",
+        )
+        self.assertEqual(
+            run_incus.call_args_list,
+            [
+                mock.call("remote", "add", "node-hk-01", "one-time-trust-token", timeout=90),
+                mock.call("remote", "set-url", "node-hk-01", "https://203.0.113.10:8443", timeout=20),
+                mock.call("query", "node-hk-01:/1.0", timeout=20),
+            ],
+        )
+
+    @mock.patch("app.registered_remotes", return_value={})
+    @mock.patch("app.run_incus")
+    def test_add_remote_rolls_back_failed_health_check(self, run_incus, _):
+        run_incus.side_effect = [None, None, RuntimeError("offline"), None]
+        with self.assertRaisesRegex(RuntimeError, "offline"):
+            app.add_remote(
+                "node-hk-01",
+                "https://203.0.113.10:8443",
+                "one-time-trust-token",
+            )
+        self.assertEqual(
+            run_incus.call_args_list[-1],
+            mock.call("remote", "remove", "node-hk-01", timeout=20),
+        )
 
 
 if __name__ == "__main__":

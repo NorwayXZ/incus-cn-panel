@@ -1,60 +1,88 @@
-# Incus 中文管理面板
+# Incus 中文集群面板
 
-面向小型服务器和实验环境的 Incus 一键部署项目。安装后可通过中文 Web 页面管理 Incus 系统容器和虚拟机，底层仍使用官方 Incus 服务。
+这是一个轻量的 Incus 多节点控制面板。中央服务器只运行中文 Web UI 和 Incus 客户端，其他 VPS 作为计算节点运行 Incus。管理员可以从一个面板接入节点，并在指定节点上创建、启动、停止、重启和删除系统容器或虚拟机。
+
+> 这不是把任意云厂商 VPS 再切成拥有独立公网 IP 的商业 VPS。默认创建的是共享宿主机内核、通过 NAT 出网的系统容器。虚拟机需要计算节点提供 `/dev/kvm`，并且需要更多内存和磁盘。
+
+## 架构
+
+```text
+浏览器 -> 中文控制面板 -> Incus 双向 TLS API -> 计算节点 A -> 容器/虚拟机
+                                      \----> 计算节点 B -> 容器/虚拟机
+```
+
+- 控制端不保存计算节点的 root 密码。
+- 节点接入使用 Incus 一次性 Trust Token，接入后由双向 TLS 客户端证书认证。
+- 从面板移除节点只会删除控制端连接，不会删除节点或其中的实例。
+- 控制端卸载不会操作任何远程节点。
 
 ## 当前功能
 
-- 自动安装 Incus 稳定版
-- 自动初始化 `dir` 存储池和 NAT 网桥
-- 中文 Web 登录和实例概览
-- 创建系统容器或虚拟机
+- 中文 Web 登录、节点与实例总览
+- 使用 Trust Token 接入多个 Incus 计算节点
+- 显示节点在线状态、CPU、内存和实例数量
+- 在指定节点创建系统容器或虚拟机
 - 设置 CPU、内存和磁盘限制
 - 启动、停止、重启和删除实例
-- 一键卸载面板，默认保留 Incus 实例数据
-- `--purge` 二次确认后彻底卸载 Incus 和全部数据
+- 控制端与计算节点分别一键安装、一键卸载
 
 ## 系统要求
 
-- Ubuntu 22.04/24.04 或当前 Debian 稳定版
-- root 权限
-- 至少 1.5 GiB 可用磁盘，实际使用建议 20 GiB 以上
-- 容器建议至少 1 GiB 内存；虚拟机建议至少 4 GiB 内存并提供 `/dev/kvm`
+控制端：
 
-## 一键安装
+- Ubuntu 22.04/24.04 或当前 Debian 稳定版
+- root 权限、至少 256 MiB 可用磁盘
+- 可通过 TCP 访问各计算节点的 `8443` 端口
+
+计算节点：
+
+- Ubuntu 22.04/24.04 或当前 Debian 稳定版
+- root 权限、至少 1.5 GiB 可用磁盘
+- 容器建议至少 1 GiB 内存，实际磁盘建议 20 GiB 以上
+- 虚拟机建议至少 4 GiB 内存并提供 `/dev/kvm`
+
+## 安装控制端
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootstrap.sh | sudo bash
 ```
 
-可通过环境变量指定账号、密码和端口：
+可以指定面板账号、密码和端口：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootstrap.sh \
   | sudo env PANEL_USER=admin PANEL_PASSWORD='请设置至少10位的强密码' PANEL_PORT=8443 bash
 ```
 
-安装完成后会显示访问地址和随机密码，同时凭据保存在 root 用户可读的 `/root/incus-cn-panel-credentials.txt`。面板默认使用自签名 HTTPS 证书，首次访问需要在浏览器中确认。
+安装完成后会显示访问地址和随机密码，凭据保存在 `/root/incus-cn-panel-credentials.txt`。面板默认使用自签名 HTTPS 证书；已有 Caddy 域名时可参考 [Caddy 反向代理](docs/caddy.md)。
 
-## 一键卸载
+## 安装计算节点
 
-只卸载中文面板，保留 Incus 和全部实例：
+在每台计算节点执行。建议设置控制端公网 IP，这样脚本在 UFW 已启用时只向控制端放行 `8443`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootstrap-node.sh \
+  | sudo env CONTROLLER_IP=203.0.113.10 TRUST_NAME=incus-cn-panel bash
+```
+
+脚本会安装 Incus，初始化 `dir` 存储池和 NAT 网桥，并输出节点地址与一次性 Trust Token。登录控制面板，点击“添加节点”，填写这两项即可。成功接入后可以删除节点上的 `/root/incus-node-token.txt`。
+
+## 卸载
+
+卸载控制端，不触碰任何计算节点或实例：
 
 ```bash
 sudo incus-cn-panel-uninstall
 ```
 
-永久删除面板、Incus 和全部实例数据：
+彻底卸载一台计算节点及其全部实例和 Incus 数据：
 
 ```bash
-sudo incus-cn-panel-uninstall --purge
+sudo incus-cn-node-uninstall
 ```
 
-`--purge` 会要求再次输入 `PURGE`，此操作不可恢复。
+节点卸载会要求输入 `PURGE-NODE` 二次确认。该操作不可恢复。若只想断开节点，直接在面板点击“移除”，不要运行节点卸载命令。
 
-## 说明
+## 边界
 
-这是轻量管理面板，不是完整的 VPS 销售系统。它不包含计费、用户自助中心、IP 地址池、工单、滥用控制和自动备份。公网 IPv4 也不会由 Incus 自动产生：没有额外公网 IP 时，实例默认通过 NAT 共享宿主机出口。
-
-生产环境建议为面板绑定域名并在 Caddy 或 Nginx 上配置受信任的 HTTPS 证书，同时限制管理端口的来源 IP。
-
-已有 Caddy 域名时，可参考 [docs/caddy.md](docs/caddy.md) 把面板挂到域名的 `/incus/` 路径。
+这个项目不包含计费、租户自助中心、IP 地址池、端口转发管理、工单、滥用控制和自动备份。没有额外公网 IP 时，实例默认通过 NAT 共享宿主机出口，外部入站服务还需要在宿主机配置端口转发或反向代理。

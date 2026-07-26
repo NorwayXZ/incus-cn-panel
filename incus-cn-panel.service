@@ -1,13 +1,11 @@
 [Unit]
-Description=Incus 中文管理面板
-After=network-online.target incus.service
+Description=Incus 中文集群控制面板
+After=network-online.target
 Wants=network-online.target
-Requires=incus.service
 
 [Service]
 Type=simple
 EnvironmentFile=/etc/incus-cn-panel/config.env
-Environment=HOME=/root
 ExecStart=/usr/bin/python3 /opt/incus-cn-panel/app.py
 Restart=on-failure
 RestartSec=3
@@ -15,6 +13,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
+ReadWritePaths=/etc/incus-cn-panel/incus-client
 
 [Install]
 WantedBy=multi-user.target
