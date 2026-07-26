@@ -1042,8 +1042,17 @@ with open(os.path.join(ASSET_DIR, "index.html"), encoding="utf-8") as html_file:
     HTML = html_file.read()
 
 
+class PanelServer(ThreadingHTTPServer):
+    request_queue_size = 128
+    daemon_threads = True
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "IncusCNPanel/0.7"
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(30)
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}", flush=True)
@@ -1435,11 +1444,15 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     if not PASSWORD_SALT or not PASSWORD_HASH:
         raise SystemExit("缺少面板密码配置")
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server = PanelServer((HOST, PORT), Handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(TLS_CERT, TLS_KEY)
-    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.socket = context.wrap_socket(
+        server.socket,
+        server_side=True,
+        do_handshake_on_connect=False,
+    )
     print(f"Incus 中文集群面板正在监听 https://{HOST}:{PORT}", flush=True)
     server.serve_forever()
 

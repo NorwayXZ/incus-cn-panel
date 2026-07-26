@@ -91,6 +91,13 @@ class ValidationTests(unittest.TestCase):
             source = source_file.read()
         self.assertEqual(source.count("script-src 'self' 'unsafe-inline'"), 2)
 
+    def test_tls_handshake_cannot_block_the_accept_loop(self):
+        with open(app.__file__, encoding="utf-8") as source_file:
+            source = source_file.read()
+        self.assertIn("do_handshake_on_connect=False", source)
+        self.assertGreaterEqual(app.PanelServer.request_queue_size, 128)
+        self.assertTrue(app.PanelServer.daemon_threads)
+
     def test_normalize_node_address(self):
         self.assertEqual(
             app.normalize_address("203.0.113.10"),
