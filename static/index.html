@@ -16,17 +16,41 @@
     .hidden { display:none!important; }
     .muted { color:var(--muted); }
     .mono { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; }
-    .login-shell { min-height:100vh; display:grid; grid-template-columns:minmax(320px,460px) 1fr; background:#fff; }
-    .login-panel { display:flex; flex-direction:column; justify-content:center; padding:clamp(32px,7vw,88px); border-right:1px solid var(--line); }
-    .login-visual { display:flex; align-items:flex-end; padding:64px; color:#fff; background:#172554; }
-    .visual-copy { max-width:650px; }
-    .visual-copy>svg { width:52px; height:52px; margin-bottom:22px; color:#93c5fd; }
-    .visual-copy strong { display:block; font-size:32px; margin-bottom:12px; }
-    .visual-copy span { color:#dbeafe; font-size:16px; }
+    .login-shell { min-height:100vh; min-height:100svh; display:grid; grid-template-columns:minmax(430px,500px) minmax(0,1fr); background:#fff; }
+    .login-panel { position:relative; z-index:1; min-width:0; display:flex; flex-direction:column; padding:34px clamp(42px,5vw,68px) 28px; background:#fff; border-right:1px solid var(--line); }
+    .login-brand { display:flex; align-items:center; gap:11px; }
+    .login-brand-copy strong,.login-brand-copy span { display:block; }
+    .login-brand-copy strong { color:var(--nav); font-size:16px; }
+    .login-brand-copy span { color:var(--muted); font-size:11px; }
+    .login-form { width:100%; max-width:370px; margin:auto 0; padding:42px 0; }
+    .login-eyebrow { display:block; margin-bottom:8px; color:#175cd3; font-size:11px; font-weight:800; text-transform:uppercase; }
+    .login-form h1 { margin:0 0 7px; font-size:27px; line-height:1.25; }
+    .login-form > p { margin:0 0 28px; color:var(--muted); }
+    .login-field { display:grid; gap:7px; margin-top:17px; }
+    .login-input { position:relative; }
+    .login-input > svg { position:absolute; z-index:1; top:50%; left:13px; width:17px; height:17px; color:#98a2b3; transform:translateY(-50%); pointer-events:none; }
+    .login-input input { min-height:48px; padding-left:41px; }
+    .login-input.password input { padding-right:46px; }
+    .login-password-toggle { position:absolute; z-index:2; top:5px; right:5px; width:38px; height:38px; display:grid; place-items:center; padding:0; color:#667085; background:transparent; border:0; border-radius:5px; }
+    .login-password-toggle:hover { color:#344054; background:#f2f4f7; }
+    .login-password-toggle:focus-visible { outline:2px solid #84adff; outline-offset:1px; }
+    .login-submit { width:100%; min-height:46px; margin-top:24px; }
+    .login-submit .lucide-loader-circle { animation:instance-action-spin .8s linear infinite; }
+    .login-error { min-height:42px; display:flex; align-items:flex-start; gap:8px; margin-top:13px; padding:10px 11px; color:var(--red); background:var(--red-soft); border:1px solid #fecdca; border-radius:6px; font-size:12px; }
+    .login-error.success { color:var(--green); background:var(--green-soft); border-color:#abefc6; }
+    .login-error svg { width:16px; height:16px; margin-top:1px; }
+    .login-foot { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#98a2b3; font-size:11px; }
+    .login-foot span { display:flex; align-items:center; gap:5px; }
+    .login-foot svg { width:14px; height:14px; }
+    .login-visual { position:relative; min-width:0; overflow:hidden; background:#dfe5ed url('assets/login-console.webp') center top / cover no-repeat; }
+    .login-visual::after { content:""; position:absolute; inset:0; background:rgba(16,24,40,.2); }
+    .visual-copy { position:absolute; z-index:1; right:0; bottom:0; left:0; padding:48px 54px; color:#fff; text-shadow:0 1px 8px rgba(16,24,40,.35); }
+    .visual-copy strong,.visual-copy span { display:block; }
+    .visual-copy strong { margin:7px 0 2px; font-size:30px; }
+    .visual-copy > span:last-child { color:#f2f4f7; font-size:14px; }
+    .visual-kicker { font-size:10px; font-weight:800; text-transform:uppercase; }
     .brand { display:flex; align-items:center; gap:11px; color:var(--nav); font-size:18px; font-weight:750; }
     .brand-mark { width:34px; height:34px; display:grid; place-items:center; color:#fff; background:var(--blue); border-radius:7px; }
-    .login-panel h1 { margin:42px 0 6px; font-size:25px; }
-    .login-panel p { margin:0 0 26px; color:var(--muted); }
     label { display:block; margin:0; color:#344054; font-weight:650; }
     input,select,textarea { width:100%; min-height:42px; padding:9px 11px; color:var(--ink); background:#fff; border:1px solid #cfd4dc; border-radius:6px; outline:none; }
     textarea { min-height:104px; resize:vertical; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; }
@@ -40,8 +64,6 @@
     .btn.icon { width:38px; padding:0; }
     .btn.small { min-height:31px; padding:4px 9px; font-size:13px; }
     .btn:disabled { cursor:not-allowed; opacity:.5; }
-    .login-panel label { margin:15px 0 7px; }
-    .login-panel .btn { width:100%; margin-top:24px; }
     .error { min-height:21px; margin-top:11px; color:var(--red); white-space:pre-wrap; }
     .topbar { position:fixed; z-index:20; top:0; right:0; left:0; height:60px; display:flex; align-items:center; justify-content:space-between; padding:0 22px; background:#fff; border-bottom:1px solid var(--line); }
     .top-actions { display:flex; align-items:center; gap:8px; }
@@ -293,8 +315,8 @@
       .grid3,.grid4,.port-grid,.capacity-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
       .capacity-strip:not(.capacity-strip-four) .capacity-item:last-child { grid-column:1 / -1; }
     }
+    @media (max-width:900px) { .login-shell { grid-template-columns:1fr; } .login-visual { display:none; } .login-panel { min-height:100vh; min-height:100svh; padding:28px clamp(24px,8vw,56px) 22px; } .login-form { align-self:center; margin:auto; padding:38px 0; } }
     @media (max-width:760px) {
-      .login-shell { grid-template-columns:1fr; } .login-visual { display:none; } .login-panel { padding:32px 24px; }
       .topbar { height:56px; padding:0 13px; } .topbar .brand span:last-child { font-size:15px; } .connection { display:none; }
       .account-button,.topbar #logout { width:38px; padding:0; }
       .account-button span,.topbar #logout span { display:none; }
@@ -324,16 +346,20 @@
 </head>
 <body>
   <section id="login" class="login-shell">
-    <form id="loginForm" class="login-panel">
-      <div class="brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span>Incus Control</span></div>
-      <h1>账户登录</h1>
-      <p>进入实例与计算资源控制台</p>
-      <label for="username">用户名</label><input id="username" autocomplete="username" required>
-      <label for="password">密码</label><input id="password" type="password" autocomplete="current-password" required>
-      <button class="btn primary" type="submit"><i data-lucide="log-in"></i>登录控制台</button>
-      <div id="loginError" class="error"></div>
-    </form>
-    <div class="login-visual"><div class="visual-copy"><i data-lucide="network"></i><strong>集中管理 Incus 计算资源</strong><span>节点接入、资源切分、实例生命周期与操作记录统一管理。</span></div></div>
+    <div class="login-panel">
+      <div class="login-brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span class="login-brand-copy"><strong>Incus Control</strong><span>中文集群控制面板</span></span></div>
+      <form id="loginForm" class="login-form">
+        <span class="login-eyebrow">Control panel</span>
+        <h1>登录控制台</h1>
+        <p>使用管理员或已授权账户继续</p>
+        <div class="login-field"><label for="username">用户名</label><div class="login-input"><i data-lucide="user-round"></i><input id="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></div></div>
+        <div class="login-field"><label for="password">密码</label><div class="login-input password"><i data-lucide="lock-keyhole"></i><input id="password" type="password" autocomplete="current-password" required><button id="toggleLoginPassword" class="login-password-toggle" type="button" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></div></div>
+        <button id="loginSubmit" class="btn primary login-submit" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
+        <div id="loginError" class="login-error hidden" role="alert"><i data-lucide="circle-alert"></i><span id="loginErrorText"></span></div>
+      </form>
+      <div class="login-foot"><span><i data-lucide="shield-check"></i>安全连接</span><span>Incus API</span></div>
+    </div>
+    <div class="login-visual" aria-hidden="true"><div class="visual-copy"><span class="visual-kicker">Incus infrastructure</span><strong>Incus Control</strong><span>Private infrastructure console</span></div></div>
   </section>
 
   <section id="app" class="hidden">
@@ -490,7 +516,8 @@
     const pct=(used,total)=>total?Math.min(100,Math.round(used/total*100)):0;
     async function api(path,options={}){options.headers={'Content-Type':'application/json',...(options.headers||{})};if(csrf)options.headers['X-CSRF-Token']=csrf;const response=await fetch(apiBase+path,options);const data=await response.json().catch(()=>({error:'服务器返回了无效响应'}));if(response.status===401)showLogin();if(!response.ok)throw new Error(data.error||'请求失败');return data;}
     const isAdmin=()=>currentAccount.role==='admin';
-    function showLogin(message=''){clearTimeout(updatePollTimer);stopNodeLivePolling();nodeLiveSamples.clear();if($('adminAccountDialog').open)$('adminAccountDialog').close();$('app').classList.add('hidden');$('login').classList.remove('hidden');if(message)$('loginError').textContent=message;}
+    function setLoginError(message='',kind='error'){const box=$('loginError'),icon=iconSvg(kind==='success'?'circle-check':'circle-alert');$('loginErrorText').textContent=message;if(icon)box.firstElementChild.outerHTML=icon;box.classList.toggle('success',kind==='success');box.classList.toggle('hidden',!message);}
+    function showLogin(message='',kind='error'){clearTimeout(updatePollTimer);stopNodeLivePolling();nodeLiveSamples.clear();if($('adminAccountDialog').open)$('adminAccountDialog').close();$('app').classList.add('hidden');$('login').classList.remove('hidden');setLoginError(message,kind);}
     function showApp(){$('login').classList.add('hidden');$('app').classList.remove('hidden');}
     function toast(message){$('toastText').textContent=message;$('toast').classList.remove('hidden');setTimeout(()=>$('toast').classList.add('hidden'),3500);}
     function applyAccount(){const admin=isAdmin();document.querySelectorAll('[data-admin-only]').forEach(x=>x.classList.toggle('hidden',!admin));$('onlineLabel').textContent=admin?'管理员 · '+currentAccount.username:'普通用户 · '+currentAccount.username;document.querySelector('.sidebar-foot').textContent=admin?`管理员 · v${cluster.panel_version||'0.0.0'}`:'限时实例授权';$('instancePageDescription').textContent=admin?'查看和控制全部节点上的容器与虚拟机':'仅显示管理员授权且尚未到期的实例';if(!admin)showView('instances');}
@@ -563,11 +590,12 @@
     function setSize(prefix,value){const match=String(value).match(/^(\d+)(MiB|GiB)$/);if(!match)return;$(prefix+'Value').value=match[1];$(prefix+'Unit').value=match[2];}
     document.addEventListener('click',e=>{const go=e.target.closest('[data-go]');if(go)showView(go.dataset.go);const nav=e.target.closest('.nav-item');if(nav)showView(nav.dataset.view);const mode=e.target.closest('[data-create-mode]');if(mode)setCreateMode(mode.dataset.createMode);const imageMode=e.target.closest('[data-image-tab]');if(imageMode){imageTab=imageMode.dataset.imageTab;renderImages();}const pull=e.target.closest('[data-pull-image]');if(pull)pullImage(pull.dataset.pullImage);const deleteButton=e.target.closest('[data-delete-image]');if(deleteButton)deleteImage(deleteButton.dataset.deleteImage);const access=e.target.closest('[data-access-instance]');if(access)openAccess(access.dataset.node,access.dataset.accessInstance);const traffic=e.target.closest('[data-traffic-instance]');if(traffic)openTrafficManager(traffic.dataset.node,traffic.dataset.trafficInstance);const copy=e.target.closest('[data-copy-target]');if(copy)copyField(copy.dataset.copyTarget);const act=e.target.closest('[data-instance-action]');if(act)instanceAction(act.dataset.node,act.dataset.instance,act.dataset.instanceAction);const del=e.target.closest('[data-delete-instance]');if(del)deleteInstance(del.dataset.node,del.dataset.deleteInstance);const node=e.target.closest('[data-remove-node]');if(node)removeNode(node.dataset.removeNode);});
     document.addEventListener('click',e=>{const manage=e.target.closest('[data-manage-user]');if(manage)openUserManager(manage.dataset.manageUser);const remove=e.target.closest('[data-delete-user]');if(remove)deleteUser(remove.dataset.deleteUser);});
-    $('loginForm').addEventListener('submit',async e=>{e.preventDefault();$('loginError').textContent='';try{const d=await api('/api/login',{method:'POST',body:JSON.stringify({username:$('username').value,password:$('password').value})});csrf=d.csrf;currentAccount=d.account||currentAccount;await load();}catch(err){$('loginError').textContent=err.message;}});
+    $('toggleLoginPassword').addEventListener('click',()=>{const password=$('password'),button=$('toggleLoginPassword'),show=password.type==='password';password.type=show?'text':'password';button.title=show?'隐藏密码':'显示密码';button.setAttribute('aria-label',button.title);button.innerHTML=`<i data-lucide="${show?'eye-off':'eye'}"></i>`;icons();password.focus();});
+    $('loginForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('loginSubmit');setLoginError('');button.disabled=true;button.innerHTML='<i data-lucide="loader-circle"></i><span>正在登录</span>';icons();try{const d=await api('/api/login',{method:'POST',body:JSON.stringify({username:$('username').value,password:$('password').value})});csrf=d.csrf;currentAccount=d.account||currentAccount;await load();}catch(err){setLoginError(err.message);}finally{button.disabled=false;button.innerHTML='<i data-lucide="log-in"></i><span>登录</span>';icons();}});
     $('logout').onclick=async()=>{try{await api('/api/logout',{method:'POST',body:'{}'});}finally{csrf='';currentAccount={username:'',role:''};showLogin();}};$('globalRefresh').onclick=$('instanceRefresh').onclick=load;
     $('openAdminAccount').onclick=()=>{$('adminAccountForm').reset();$('adminAccountError').textContent='';$('adminAccountDialog').showModal();setTimeout(()=>$('currentAdminPassword').focus());};
     $('closeAdminAccount').onclick=$('cancelAdminAccount').onclick=()=>$('adminAccountDialog').close();
-    $('adminAccountForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('adminAccountSubmit'),newPassword=$('newAdminPassword').value,confirmPassword=$('confirmAdminPassword').value;$('adminAccountError').textContent='';if(newPassword!==confirmPassword){$('adminAccountError').textContent='两次输入的新密码不一致';return;}button.disabled=true;try{const data=await api('/api/account/password',{method:'POST',body:JSON.stringify({current_password:$('currentAdminPassword').value,new_password:newPassword,confirm_password:confirmPassword})});$('adminAccountDialog').close();csrf='';currentAccount={username:'',role:''};$('password').value='';showLogin(data.message);$('password').focus();}catch(err){$('adminAccountError').textContent=err.message;}finally{button.disabled=false;}});
+    $('adminAccountForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('adminAccountSubmit'),newPassword=$('newAdminPassword').value,confirmPassword=$('confirmAdminPassword').value;$('adminAccountError').textContent='';if(newPassword!==confirmPassword){$('adminAccountError').textContent='两次输入的新密码不一致';return;}button.disabled=true;try{const data=await api('/api/account/password',{method:'POST',body:JSON.stringify({current_password:$('currentAdminPassword').value,new_password:newPassword,confirm_password:confirmPassword})});$('adminAccountDialog').close();csrf='';currentAccount={username:'',role:''};$('password').value='';showLogin(data.message,'success');$('password').focus();}catch(err){$('adminAccountError').textContent=err.message;}finally{button.disabled=false;}});
     $('checkUpdate').onclick=()=>loadVersionInfo(true);$('startUpdate').onclick=startPanelUpdate;
     $('closeAccess').onclick=$('accessDone').onclick=()=>$('accessDialog').close();
     $('closeTraffic').onclick=$('cancelTraffic').onclick=()=>$('trafficDialog').close();

@@ -22,13 +22,13 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.3.0")
-        self.assertLess(app.version_tuple("1.3.0"), app.version_tuple("1.4.0"))
+        self.assertEqual(app.APP_VERSION, "1.4.0")
+        self.assertLess(app.version_tuple("1.4.0"), app.version_tuple("1.5.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"1.4.0\n"
+        response.read.return_value = b"1.5.0\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "1.4.0")
+            self.assertEqual(app.fetch_latest_version(), "1.5.0")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -37,10 +37,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "1.4.0",
+            "status": "running", "target_version": "1.5.0",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "1.4.0")
+        self.assertEqual(payload["latest_version"], "1.5.0")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -56,7 +56,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("1.4.0")
+                    status = app.start_panel_update("1.5.0")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -64,7 +64,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "1.4.0")
+                self.assertEqual(saved["target_version"], "1.5.0")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -97,10 +97,10 @@ class ValidationTests(unittest.TestCase):
 
         try:
             version_payload = {
-                "current_version": "1.3.0", "latest_version": "1.4.0",
+                "current_version": "1.4.0", "latest_version": "1.5.0",
                 "update_available": True, "update": {"status": "idle"},
             }
-            queued = {"status": "queued", "target_version": "1.4.0"}
+            queued = {"status": "queued", "target_version": "1.5.0"}
             live_payload = {
                 "nodes": [{"name": "node-a", "sample_ready": True}],
                 "interval_seconds": 5,
@@ -108,7 +108,7 @@ class ValidationTests(unittest.TestCase):
             with mock.patch.object(app.Handler, "log_message", return_value=None), \
                  mock.patch("app.panel_version_payload", return_value=version_payload), \
                  mock.patch("app.node_live_payload", return_value=live_payload), \
-                 mock.patch("app.fetch_latest_version", return_value="1.4.0"), \
+                 mock.patch("app.fetch_latest_version", return_value="1.5.0"), \
                  mock.patch("app.start_panel_update", return_value=queued), \
                  mock.patch("app.record_operation") as record_operation:
                 status, data = request("GET", "/api/system/version?refresh=1")
@@ -162,9 +162,32 @@ class ValidationTests(unittest.TestCase):
             uninstaller = source_file.read()
         for value in ("VERSION", "incus-cn-panel-bootstrap", "incus-cn-panel-update"):
             self.assertIn(value, installer)
+        self.assertIn("static/login-console.webp", installer)
         for value in ("password.env", "password_config_rewrite=false", "chmod 0600"):
             self.assertIn(value, installer)
         self.assertIn("incus-cn-panel-update", uninstaller)
+
+    def test_login_preview_asset_is_served(self):
+        server = app.PanelServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with mock.patch.object(app.Handler, "log_message", return_value=None):
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_address[1], timeout=5,
+                )
+                connection.request("GET", "/assets/login-console.webp")
+                response = connection.getresponse()
+                body = response.read()
+                connection.close()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Content-Type"), "image/webp")
+            self.assertTrue(body.startswith(b"RIFF"))
+            self.assertIn(b"WEBP", body[:16])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_node_uninstaller_checks_and_removes_known_residuals(self):
         uninstaller = os.path.join(os.path.dirname(app.__file__), "uninstall-node.sh")
@@ -849,6 +872,12 @@ class ValidationTests(unittest.TestCase):
 
     def test_chinese_ui_and_relative_api_base(self):
         self.assertIn("Incus Control", app.HTML)
+        self.assertIn('id="toggleLoginPassword"', app.HTML)
+        self.assertIn('id="loginSubmit"', app.HTML)
+        self.assertIn('id="loginErrorText"', app.HTML)
+        self.assertIn("assets/login-console.webp", app.HTML)
+        self.assertIn("function setLoginError", app.HTML)
+        self.assertIn("正在登录", app.HTML)
         self.assertIn("切割实例", app.HTML)
         self.assertIn("添加宿主机", app.HTML)
         self.assertIn("月流量配额", app.HTML)
