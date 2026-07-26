@@ -27,16 +27,20 @@ TLS_CERT = os.environ.get("TLS_CERT", "/etc/incus-cn-panel/panel.crt")
 TLS_KEY = os.environ.get("TLS_KEY", "/etc/incus-cn-panel/panel.key")
 DATA_DIR = os.environ.get("PANEL_DATA_DIR", "/var/lib/incus-cn-panel")
 OPERATIONS_FILE = os.path.join(DATA_DIR, "operations.jsonl")
+CREDENTIALS_FILE = os.path.join(DATA_DIR, "credentials.json")
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 SESSIONS = {}
 LOGIN_ATTEMPTS = {}
 REMOTE_CONFIG_LOCK = threading.Lock()
 INSTANCE_MUTATION_LOCK = threading.Lock()
 OPERATION_LOCK = threading.Lock()
+CREDENTIALS_LOCK = threading.Lock()
 SESSION_TTL = 12 * 60 * 60
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
 SIZE_RE = re.compile(r"^[1-9][0-9]*(MiB|GiB)$")
 RATE_RE = re.compile(r"^[1-9][0-9]*(kbit|Mbit|Gbit)$")
+SSH_PORT_MIN = 22000
+SSH_PORT_MAX = 59999
 ALLOWED_IMAGES = {
     "images:ubuntu/24.04",
     "images:debian/12",
@@ -106,6 +110,69 @@ def recent_operations(limit=50):
         except json.JSONDecodeError:
             continue
     return entries
+
+
+def _read_credentials_unlocked():
+    try:
+        with open(CREDENTIALS_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"无法读取实例连接凭据: {exc}") from exc
+    return data if isinstance(data, dict) else {}
+
+
+def save_instance_credentials(node, name, access):
+    key = f"{node}/{name}"
+    with CREDENTIALS_LOCK:
+        credentials = _read_credentials_unlocked()
+        credentials[key] = access
+        os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+        temporary = f"{CREDENTIALS_FILE}.{os.getpid()}.tmp"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(credentials, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.replace(temporary, CREDENTIALS_FILE)
+            os.chmod(CREDENTIALS_FILE, 0o600)
+        except Exception:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+
+
+def instance_credentials(node, name):
+    with CREDENTIALS_LOCK:
+        access = _read_credentials_unlocked().get(f"{node}/{name}")
+    if not access:
+        raise ValueError("该实例没有由面板生成的 SSH 连接凭据")
+    return dict(access)
+
+
+def delete_credentials(node, name=None):
+    with CREDENTIALS_LOCK:
+        credentials = _read_credentials_unlocked()
+        if name is None:
+            prefix = f"{node}/"
+            keys = [key for key in credentials if key.startswith(prefix)]
+            for key in keys:
+                credentials.pop(key, None)
+            changed = bool(keys)
+        else:
+            changed = credentials.pop(f"{node}/{name}", None) is not None
+        if not changed:
+            return
+        temporary = f"{CREDENTIALS_FILE}.{os.getpid()}.tmp"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(credentials, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temporary, CREDENTIALS_FILE)
+        os.chmod(CREDENTIALS_FILE, 0o600)
 
 
 def normalize_address(value):
@@ -271,6 +338,139 @@ def port_is_used(node, port):
     )
 
 
+def allocate_ssh_port(node):
+    raw_instances = json.loads(run_incus("list", f"{node}:", "--format=json", timeout=20))
+    used = {
+        int(value)
+        for item in raw_instances
+        if (value := (item.get("config") or {}).get("user.incus-cn-panel.ssh-port", "")).isdigit()
+    }
+    for port in range(SSH_PORT_MIN, SSH_PORT_MAX + 1):
+        if port not in used:
+            return str(port)
+    raise ValueError("该宿主机没有可分配的 SSH 端口")
+
+
+def generate_ssh_password(length=18):
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def provision_ssh(ref, password):
+    script = r'''
+set -eu
+if command -v apk >/dev/null 2>&1; then
+    apk add --no-cache openssh
+    ssh-keygen -A
+    service_name=sshd
+elif command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y openssh-server
+    mkdir -p /run/sshd
+    ssh-keygen -A
+    service_name=ssh
+else
+    echo "当前镜像不支持自动安装 OpenSSH" >&2
+    exit 1
+fi
+set_option() {
+    key=$1
+    value=$2
+    if grep -Eq "^[#[:space:]]*${key}[[:space:]]+" /etc/ssh/sshd_config; then
+        sed -i -E "s|^[#[:space:]]*${key}[[:space:]]+.*|${key} ${value}|" /etc/ssh/sshd_config
+    else
+        printf '%s %s\n' "$key" "$value" >> /etc/ssh/sshd_config
+    fi
+}
+set_option PermitRootLogin yes
+set_option PasswordAuthentication yes
+printf 'root:%s\n' "$PANEL_SSH_PASSWORD" | chpasswd
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now "$service_name"
+elif command -v rc-update >/dev/null 2>&1; then
+    rc-update add "$service_name" default
+    rc-service "$service_name" restart
+elif command -v service >/dev/null 2>&1; then
+    service "$service_name" restart
+else
+    /usr/sbin/sshd
+fi
+'''.strip()
+    run_incus(
+        "exec", ref, "--env", f"PANEL_SSH_PASSWORD={password}",
+        "--", "sh", "-c", script, timeout=600,
+    )
+
+
+def node_host(node):
+    remote = registered_remotes().get(node) or {}
+    address = (remote.get("Addrs") or [""])[0]
+    return urlparse(address).hostname or ""
+
+
+def configure_instance_access(node, name):
+    node = require_node(node)
+    if not NAME_RE.fullmatch(name):
+        raise ValueError("实例名称无效")
+    with INSTANCE_MUTATION_LOCK:
+        try:
+            return instance_credentials(node, name)
+        except ValueError:
+            pass
+        instance = json.loads(
+            run_incus("query", f"{node}:/1.0/instances/{name}?recursion=1", timeout=20)
+        )
+        config = instance.get("config") or {}
+        devices = instance.get("expanded_devices") or instance.get("devices") or {}
+        ssh_port = str(config.get("user.incus-cn-panel.ssh-port", ""))
+        added_port = False
+        added_proxy = False
+        started = False
+        if not ssh_port:
+            ssh_port = allocate_ssh_port(node)
+            run_incus("config", "set", f"{node}:{name}", "user.incus-cn-panel.ssh-port", ssh_port)
+            added_port = True
+        try:
+            if "ssh" not in devices:
+                run_incus(
+                    "config", "device", "add", f"{node}:{name}", "ssh", "proxy",
+                    f"listen=tcp:0.0.0.0:{ssh_port}", "connect=tcp:127.0.0.1:22",
+                )
+                added_proxy = True
+            if instance.get("status") != "Running":
+                run_incus("start", f"{node}:{name}", timeout=180)
+                started = True
+            password = generate_ssh_password()
+            provision_ssh(f"{node}:{name}", password)
+            access = {
+                "host": node_host(node),
+                "host_port": int(ssh_port),
+                "guest_port": 22,
+                "username": "root",
+                "password": password,
+            }
+            save_instance_credentials(node, name, access)
+            return access
+        except Exception:
+            if started:
+                try:
+                    run_incus("stop", f"{node}:{name}", "--force", timeout=180)
+                except Exception:
+                    pass
+            if added_proxy:
+                try:
+                    run_incus("config", "device", "remove", f"{node}:{name}", "ssh")
+                except Exception:
+                    pass
+            if added_port:
+                try:
+                    run_incus("config", "unset", f"{node}:{name}", "user.incus-cn-panel.ssh-port")
+                except Exception:
+                    pass
+            raise
+
+
 def create_instance(data):
     node = require_node(str(data.get("node", "")))
     name = str(data.get("name", ""))
@@ -311,6 +511,9 @@ def create_instance(data):
     with INSTANCE_MUTATION_LOCK:
         if ssh_port and port_is_used(node, ssh_port):
             raise ValueError("该节点上的 SSH 端口已被其他实例占用")
+        if not ssh_port:
+            ssh_port = allocate_ssh_port(node)
+        ssh_password = generate_ssh_password()
         init_args = ["init", image, ref]
         if kind == "virtual-machine":
             init_args.append("--vm")
@@ -320,8 +523,7 @@ def create_instance(data):
             "-c", f"limits.memory={memory}",
             "-c", f"user.incus-cn-panel.image={image}",
         ])
-        if ssh_port:
-            init_args.extend(["-c", f"user.incus-cn-panel.ssh-port={ssh_port}"])
+        init_args.extend(["-c", f"user.incus-cn-panel.ssh-port={ssh_port}"])
         run_incus(*init_args, timeout=600)
         created = True
         try:
@@ -335,17 +537,25 @@ def create_instance(data):
                 "config", "device", "override", ref, "eth0",
                 f"limits.ingress={ingress}", f"limits.egress={egress}",
             )
-            if ssh_port:
-                run_incus(
-                    "config", "device", "add", ref, "ssh", "proxy",
-                    f"listen=tcp:0.0.0.0:{ssh_port}", "connect=tcp:127.0.0.1:22",
-                )
+            run_incus(
+                "config", "device", "add", ref, "ssh", "proxy",
+                f"listen=tcp:0.0.0.0:{ssh_port}", "connect=tcp:127.0.0.1:22",
+            )
             run_incus("start", ref, timeout=180)
+            provision_ssh(ref, ssh_password)
+            access = {
+                "host": node_host(node),
+                "host_port": int(ssh_port),
+                "guest_port": 22,
+                "username": "root",
+                "password": ssh_password,
+            }
+            save_instance_credentials(node, name, access)
         except Exception:
             if created:
                 run_incus("delete", ref, "--force")
             raise
-    return node, name
+    return node, name, access
 
 
 
@@ -355,7 +565,7 @@ with open(os.path.join(ASSET_DIR, "index.html"), encoding="utf-8") as html_file:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "IncusCNPanel/0.3"
+    server_version = "IncusCNPanel/0.4"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}", flush=True)
@@ -452,6 +662,20 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json(500, {"error": str(exc)})
             return
+        access_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/access", path)
+        if access_match:
+            auth = self.require_auth()
+            if not auth:
+                return
+            try:
+                node = require_node(access_match.group(1))
+                name = access_match.group(2)
+                if not NAME_RE.fullmatch(name):
+                    raise ValueError("实例名称无效")
+                self.send_json(200, {"access": instance_credentials(node, name)})
+            except Exception as exc:
+                self.send_json(404, {"error": str(exc)})
+            return
         self.send_json(404, {"error": "页面不存在"})
 
     def do_POST(self):
@@ -515,14 +739,27 @@ class Handler(BaseHTTPRequestHandler):
                 data = self.read_json()
                 node = str(data.get("node", ""))
                 name = str(data.get("name", ""))
-                node, name = create_instance(data)
+                node, name, access = create_instance(data)
                 record_operation("instance_create", name, node)
-                self.send_json(201, {"ok": True})
+                self.send_json(201, {"ok": True, "access": access})
             except subprocess.TimeoutExpired:
                 record_operation("instance_create", name or "未知实例", node, "failed", "创建超时")
                 self.send_json(504, {"error": "镜像下载或实例创建超时"})
             except Exception as exc:
                 record_operation("instance_create", name or "未知实例", node, "failed", str(exc))
+                self.send_json(400, {"error": str(exc)})
+            return
+
+        access_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/access", path)
+        if access_match:
+            node = access_match.group(1)
+            name = access_match.group(2)
+            try:
+                access = configure_instance_access(node, name)
+                record_operation("instance_access", name, node)
+                self.send_json(200, {"ok": True, "access": access})
+            except Exception as exc:
+                record_operation("instance_access", name, node, "failed", str(exc))
                 self.send_json(400, {"error": str(exc)})
             return
 
@@ -565,6 +802,7 @@ class Handler(BaseHTTPRequestHandler):
                 node = require_node(node_match.group(1))
                 with REMOTE_CONFIG_LOCK:
                     run_incus("remote", "remove", node, timeout=20)
+                delete_credentials(node)
                 record_operation("node_remove", node, node)
                 self.send_json(200, {"ok": True})
             except Exception as exc:
@@ -579,6 +817,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not NAME_RE.fullmatch(name):
                     raise ValueError("实例名称无效")
                 run_incus("delete", f"{node}:{name}", "--force", timeout=180)
+                delete_credentials(node, name)
                 record_operation("instance_delete", name, node)
                 self.send_json(200, {"ok": True})
             except Exception as exc:

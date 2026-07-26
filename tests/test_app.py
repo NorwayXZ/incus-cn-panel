@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -52,6 +53,7 @@ class ValidationTests(unittest.TestCase):
     def test_chinese_ui_and_relative_api_base(self):
         self.assertIn("Incus Control", app.HTML)
         self.assertIn("切割实例", app.HTML)
+        self.assertIn("添加宿主机", app.HTML)
         self.assertIn('data-view="operations"', app.HTML)
         self.assertIn("location.pathname", app.HTML)
         self.assertIn("apiBase+path", app.HTML)
@@ -160,27 +162,72 @@ class ValidationTests(unittest.TestCase):
         finally:
             app.DATA_DIR, app.OPERATIONS_FILE = old_values
 
-    @mock.patch("app.port_is_used", return_value=False)
-    @mock.patch("app.require_node", return_value="node-hk-01")
+    def test_instance_credentials_are_private_and_removable(self):
+        old_values = (app.DATA_DIR, app.CREDENTIALS_FILE)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.CREDENTIALS_FILE = os.path.join(directory, "credentials.json")
+                access = {
+                    "host": "203.0.113.10",
+                    "host_port": 22001,
+                    "guest_port": 22,
+                    "username": "root",
+                    "password": "strong-password",
+                }
+                app.save_instance_credentials("node-a", "web-01", access)
+                self.assertEqual(app.instance_credentials("node-a", "web-01"), access)
+                self.assertEqual(os.stat(app.CREDENTIALS_FILE).st_mode & 0o777, 0o600)
+                app.delete_credentials("node-a", "web-01")
+                with self.assertRaisesRegex(ValueError, "没有由面板生成"):
+                    app.instance_credentials("node-a", "web-01")
+        finally:
+            app.DATA_DIR, app.CREDENTIALS_FILE = old_values
+
     @mock.patch("app.run_incus")
-    def test_create_instance_applies_limits_and_ssh_proxy(self, run_incus, _, port_is_used):
-        node, name = app.create_instance({
-            "node": "node-hk-01",
-            "name": "web-01",
-            "type": "container",
-            "image": "images:alpine/edge",
-            "cpu": "1",
-            "cpu_allowance": "50",
-            "memory": "256MiB",
-            "disk": "2GiB",
-            "ingress": "100Mbit",
-            "egress": "50Mbit",
-            "read_iops": "100",
-            "write_iops": "80",
-            "ssh_port": "22001",
-        })
-        self.assertEqual((node, name), ("node-hk-01", "web-01"))
+    def test_allocate_ssh_port_skips_existing_assignments(self, run_incus):
+        run_incus.return_value = json.dumps([
+            {"config": {"user.incus-cn-panel.ssh-port": "22000"}},
+            {"config": {"user.incus-cn-panel.ssh-port": "22002"}},
+        ])
+        self.assertEqual(app.allocate_ssh_port("node-a"), "22001")
+
+    def test_create_instance_applies_limits_and_provisions_ssh(self):
+        access = {
+            "host": "203.0.113.10",
+            "host_port": 22001,
+            "guest_port": 22,
+            "username": "root",
+            "password": "generated-password",
+        }
+        with (
+            mock.patch("app.run_incus") as run_incus,
+            mock.patch("app.require_node", return_value="node-hk-01"),
+            mock.patch("app.port_is_used", return_value=False) as port_is_used,
+            mock.patch("app.generate_ssh_password", return_value="generated-password"),
+            mock.patch("app.provision_ssh") as provision_ssh,
+            mock.patch("app.node_host", return_value="203.0.113.10"),
+            mock.patch("app.save_instance_credentials") as save_credentials,
+        ):
+            result = app.create_instance({
+                "node": "node-hk-01",
+                "name": "web-01",
+                "type": "container",
+                "image": "images:alpine/edge",
+                "cpu": "1",
+                "cpu_allowance": "50",
+                "memory": "256MiB",
+                "disk": "2GiB",
+                "ingress": "100Mbit",
+                "egress": "50Mbit",
+                "read_iops": "100",
+                "write_iops": "80",
+                "ssh_port": "22001",
+            })
+        self.assertEqual(result, ("node-hk-01", "web-01", access))
         port_is_used.assert_called_once_with("node-hk-01", "22001")
+        provision_ssh.assert_called_once_with("node-hk-01:web-01", "generated-password")
+        save_credentials.assert_called_once_with("node-hk-01", "web-01", access)
         self.assertIn(
             mock.call(
                 "config", "device", "add", "node-hk-01:web-01", "ssh", "proxy",
@@ -195,6 +242,41 @@ class ValidationTests(unittest.TestCase):
             ),
             run_incus.call_args_list,
         )
+
+    def test_existing_instance_can_be_given_ssh_access(self):
+        instance = {
+            "name": "legacy-01",
+            "status": "Stopped",
+            "config": {},
+            "expanded_devices": {},
+        }
+        access = {
+            "host": "203.0.113.10",
+            "host_port": 22000,
+            "guest_port": 22,
+            "username": "root",
+            "password": "generated-password",
+        }
+        with (
+            mock.patch("app.require_node", return_value="node-a"),
+            mock.patch("app.instance_credentials", side_effect=ValueError("missing")),
+            mock.patch("app.run_incus") as run_incus,
+            mock.patch("app.allocate_ssh_port", return_value="22000"),
+            mock.patch("app.generate_ssh_password", return_value="generated-password"),
+            mock.patch("app.provision_ssh") as provision_ssh,
+            mock.patch("app.node_host", return_value="203.0.113.10"),
+            mock.patch("app.save_instance_credentials") as save_credentials,
+        ):
+            run_incus.return_value = json.dumps(instance)
+            result = app.configure_instance_access("node-a", "legacy-01")
+        self.assertEqual(result, access)
+        self.assertIn(
+            mock.call("config", "set", "node-a:legacy-01", "user.incus-cn-panel.ssh-port", "22000"),
+            run_incus.call_args_list,
+        )
+        self.assertIn(mock.call("start", "node-a:legacy-01", timeout=180), run_incus.call_args_list)
+        provision_ssh.assert_called_once_with("node-a:legacy-01", "generated-password")
+        save_credentials.assert_called_once_with("node-a", "legacy-01", access)
 
 
 if __name__ == "__main__":
