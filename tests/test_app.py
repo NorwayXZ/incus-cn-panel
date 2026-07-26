@@ -22,8 +22,8 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.4.0")
-        self.assertLess(app.version_tuple("1.4.0"), app.version_tuple("1.5.0"))
+        self.assertEqual(app.APP_VERSION, "1.4.1")
+        self.assertLess(app.version_tuple("1.4.1"), app.version_tuple("1.5.0"))
         response = mock.MagicMock()
         response.read.return_value = b"1.5.0\n"
         response.__enter__.return_value = response
@@ -97,7 +97,7 @@ class ValidationTests(unittest.TestCase):
 
         try:
             version_payload = {
-                "current_version": "1.4.0", "latest_version": "1.5.0",
+                "current_version": "1.4.1", "latest_version": "1.5.0",
                 "update_available": True, "update": {"status": "idle"},
             }
             queued = {"status": "queued", "target_version": "1.5.0"}
@@ -162,7 +162,7 @@ class ValidationTests(unittest.TestCase):
             uninstaller = source_file.read()
         for value in ("VERSION", "incus-cn-panel-bootstrap", "incus-cn-panel-update"):
             self.assertIn(value, installer)
-        self.assertIn("static/login-console.webp", installer)
+        self.assertIn("static/login-datacenter.webp", installer)
         for value in ("password.env", "password_config_rewrite=false", "chmod 0600"):
             self.assertIn(value, installer)
         self.assertIn("incus-cn-panel-update", uninstaller)
@@ -176,7 +176,7 @@ class ValidationTests(unittest.TestCase):
                 connection = http.client.HTTPConnection(
                     "127.0.0.1", server.server_address[1], timeout=5,
                 )
-                connection.request("GET", "/assets/login-console.webp")
+                connection.request("GET", "/assets/login-datacenter.webp")
                 response = connection.getresponse()
                 body = response.read()
                 connection.close()
@@ -875,7 +875,7 @@ class ValidationTests(unittest.TestCase):
         self.assertIn('id="toggleLoginPassword"', app.HTML)
         self.assertIn('id="loginSubmit"', app.HTML)
         self.assertIn('id="loginErrorText"', app.HTML)
-        self.assertIn("assets/login-console.webp", app.HTML)
+        self.assertIn("assets/login-datacenter.webp", app.HTML)
         self.assertIn("function setLoginError", app.HTML)
         self.assertIn("正在登录", app.HTML)
         self.assertIn("切割实例", app.HTML)

@@ -2747,8 +2747,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/assets/lucide.min.js":
             self.send_asset("lucide.min.js", "text/javascript; charset=utf-8")
             return
-        if path == "/assets/login-console.webp":
-            self.send_asset("login-console.webp", "image/webp")
+        if path == "/assets/login-datacenter.webp":
+            self.send_asset("login-datacenter.webp", "image/webp")
             return
         if path == "/api/overview":
             auth = self.require_auth()
