@@ -338,12 +338,169 @@
       table { min-width:820px; } .dashboard-grid table { min-width:640px; }
     }
     @media (max-width:360px) { .nav-item { font-size:7px; } }
+
+    /* Editorial operations theme inspired by the supplied reference. */
+    :root {
+      --ink:#1e1333; --muted:#746b7d; --line:#ddd4c6; --soft:#f3eee6; --paper:#fffaf0;
+      --blue:#7c5cff; --blue-soft:#f0edff; --green:#2f7a64; --green-soft:#e9f5ef;
+      --amber:#9b6b18; --amber-soft:#fbf1d9; --red:#c94f3d; --red-soft:#fbece8;
+      --nav:#1e1333; --gold:#c9922f; --cream:#faf3e7; --coral:#ef6a52; --uv:#7c5cff;
+      --display-font:"Iowan Old Style","Palatino Linotype","Songti SC","STSong",Georgia,serif;
+      --mono-font:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+    }
+    body { color:var(--ink); background:#f3eee5; }
+    .mono { font-family:var(--mono-font); }
+    .brand-mark { color:var(--cream); background:var(--ink); border:1px solid rgba(201,146,47,.55); border-radius:50%; }
+    .topbar { height:68px; padding:0 24px; background:var(--paper); border-bottom:1px solid var(--line); box-shadow:0 1px 0 rgba(30,19,51,.03); }
+    .topbar::after { content:""; position:absolute; right:0; bottom:-1px; left:0; height:2px; background:var(--gold); opacity:.72; }
+    .brand { gap:10px; color:var(--ink); font-family:var(--display-font); font-size:19px; font-weight:600; }
+    .top-brand-copy { display:grid; gap:0; line-height:1.05; }
+    .top-brand-copy small { color:var(--gold); font:9px/1.2 var(--mono-font); }
+    .top-brand-copy strong { font-family:var(--display-font); font-size:18px; font-weight:600; }
+    .connection { color:var(--muted); font-family:var(--mono-font); font-size:11px; }
+    .connection-dot { background:var(--coral); box-shadow:0 0 0 3px rgba(239,106,82,.13); }
+    .sidebar { top:68px; width:238px; padding:20px 12px 16px; background:var(--ink); border-right:1px solid rgba(201,146,47,.42); }
+    .nav-label { padding:7px 12px 10px; color:var(--gold); font:10px/1.4 var(--mono-font); }
+    .nav-item { min-height:43px; padding:9px 12px; color:#cfc6d8; border-radius:4px; font-weight:600; }
+    .nav-item:hover { color:var(--cream); background:rgba(250,243,231,.07); }
+    .nav-item.active { color:#f7dda8; background:rgba(201,146,47,.15); }
+    .nav-item.active::before { content:""; position:absolute; top:9px; bottom:9px; left:0; width:2px; background:var(--gold); }
+    .nav-item svg { color:currentColor; }
+    .nav-badge { color:var(--ink); background:var(--coral); }
+    .sidebar-foot { color:#9488a1; border-top-color:rgba(250,243,231,.12); font-family:var(--mono-font); font-size:10px; }
+    .workspace { margin-left:238px; padding:98px 30px 42px; background:#f3eee5; }
+    .page-head { align-items:flex-end; margin-bottom:24px; padding-bottom:17px; border-bottom:1px solid rgba(30,19,51,.14); }
+    .page-kicker { display:block; margin-bottom:5px; color:var(--gold); font:10px/1.4 var(--mono-font); }
+    .page-head h1 { margin:0 0 4px; color:var(--ink); font-family:var(--display-font); font-size:31px; font-weight:600; line-height:1.08; }
+    .page-head p { color:var(--muted); }
+    .page-actions { gap:9px; }
+    label,.field > label { color:#574c61; font-family:var(--mono-font); font-size:11px; font-weight:650; }
+    input,select,textarea { color:var(--ink); background:#fffdf7; border-color:#cfc5b6; border-radius:4px; }
+    input:focus,select:focus,textarea:focus { border-color:var(--gold); box-shadow:0 0 0 3px rgba(201,146,47,.13); }
+    input:disabled { color:#9b929f; background:#eee9e1; }
+    .btn { min-height:38px; color:var(--ink); background:var(--paper); border-color:#cfc5b6; border-radius:999px; font-family:var(--mono-font); font-size:11px; }
+    .btn:hover { color:var(--ink); background:#f3ead9; border-color:#b8aa98; }
+    .btn.primary { color:var(--cream); background:var(--ink); border-color:var(--ink); }
+    .btn.primary:hover { color:var(--ink); background:var(--gold); border-color:var(--gold); }
+    .btn.danger { color:var(--red); background:var(--red-soft); border-color:#e8b8ae; }
+    .btn.icon { border-radius:50%; }
+    .panel,.metric,.form-section,.node-card,.image-card,.summary { background:var(--paper); border-color:var(--line); border-radius:6px; box-shadow:0 10px 28px rgba(30,19,51,.045); }
+    .panel-head { border-bottom-color:var(--line); }
+    .panel-head h2,.section-title h2,.notification-section h3 { color:var(--ink); font-family:var(--display-font); font-weight:600; }
+    .panel-head h2 { font-size:17px; }
+    .metrics { gap:13px; }
+    .metric { position:relative; min-height:128px; padding:18px; overflow:hidden; border-top-width:3px; }
+    .metric.blue { border-top-color:var(--uv); }
+    .metric.green { border-top-color:var(--green); }
+    .metric.amber { border-top-color:var(--gold); }
+    .metric.gray { border-top-color:#81758c; }
+    .metric-top { color:var(--muted); font-family:var(--mono-font); font-size:11px; }
+    .metric-icon { width:34px; height:34px; background:transparent!important; border:1px solid currentColor; border-radius:50%; }
+    .metric.blue .metric-icon { color:var(--uv); }
+    .metric.green .metric-icon { color:var(--green); }
+    .metric.amber .metric-icon { color:var(--gold); }
+    .metric.gray .metric-icon { color:#81758c; }
+    .metric strong { color:var(--ink); font-family:var(--mono-font); font-size:28px; }
+    .metric small { color:var(--muted); }
+    th { color:#8e651c; background:#f5eee1; font-family:var(--mono-font); font-size:10px; }
+    th,td { border-bottom-color:#e5dccf; }
+    tbody tr:hover { background:#fffdf8; }
+    .status { font-family:var(--mono-font); font-size:10px; }
+    .status.online,.status.running,.status.success { color:var(--green); background:var(--green-soft); }
+    .status.offline,.status.stopped { color:#695f70; background:#eee9e2; }
+    .status.failed { color:var(--red); background:var(--red-soft); }
+    .status.transitioning { color:var(--uv); background:var(--blue-soft); }
+    .bar { background:#e7ded2; }
+    .bar span { background:var(--gold); }
+    .log-dot { background:var(--gold); }
+    .log-dot.failed { background:var(--coral); }
+    .log-item { border-bottom-color:#e5dccf; }
+    .type-icon { color:var(--uv); background:var(--blue-soft); border-radius:50%; }
+    .instance-action-button.setting { color:var(--ink); background:var(--paper); }
+    .instance-action-button.start { color:var(--green); border-color:#a8d4c1; background:var(--green-soft); }
+    .instance-action-button.stop { color:var(--amber); border-color:#e1c789; background:var(--amber-soft); }
+    .instance-action-button.restart { color:var(--uv); border-color:#c4b9fa; background:var(--blue-soft); }
+    .instance-action-button.danger { color:var(--red); background:var(--red-soft); }
+    @keyframes instance-row-pulse { 0%,100% { background:var(--paper); } 50% { background:#f5eee1; } }
+    .form-section { padding:21px 22px; }
+    .section-title { color:var(--gold); }
+    .section-title svg { width:19px; height:19px; }
+    .section-title span,.field-note,.mode-note { color:var(--muted); }
+    .summary-head { color:var(--cream); background:var(--ink); border-bottom:2px solid var(--gold); }
+    .summary-head strong { font-family:var(--display-font); font-size:18px; }
+    .summary-head span { color:#bdb1c8; font-family:var(--mono-font); font-size:10px; }
+    .summary-row { border-bottom-color:#e5dccf; }
+    .step-number { color:var(--ink); background:var(--gold); border-radius:50%; font-family:var(--mono-font); }
+    .command-field input,.command-field .btn,.input-unit input,.input-unit select,.copy-field input,.copy-field .btn { border-color:#cfc5b6; }
+    .create-tabs { background:#e7dfd3; border-radius:999px; }
+    .create-tab { border-radius:999px; font-family:var(--mono-font); font-size:11px; }
+    .create-tab.active { color:var(--cream); background:var(--ink); box-shadow:none; }
+    .image-tabs { border-bottom-color:var(--line); }
+    .image-tab { font-family:var(--mono-font); font-size:11px; }
+    .image-tab.active { color:var(--gold); border-bottom-color:var(--gold); }
+    .image-profile,.access-value,.telegram-state { color:var(--ink); background:#f7f1e7; border-color:var(--line); }
+    .capacity-strip,.update-facts { background:var(--line); border-color:var(--line); }
+    .capacity-item,.update-fact { background:#f7f1e7; }
+    .capacity-item span,.update-fact span,.node-facts span,.node-live-label { color:var(--muted); font-family:var(--mono-font); font-size:10px; }
+    .capacity-item strong,.update-fact strong,.node-live-stat strong,.node-facts strong { font-family:var(--mono-font); }
+    .batch-capacity { color:var(--uv); background:var(--blue-soft); border-color:#c4b9fa; }
+    .node-live-grid { background:#f7f1e7; border-color:var(--line); }
+    .node-live-stat,.node-facts { border-color:var(--line); }
+    .live-refresh-state { color:var(--muted); font-family:var(--mono-font); font-size:10px; }
+    .live-refresh-dot { background:var(--coral); }
+    .notification-item,.notification-rule,.assignment-row { border-bottom-color:var(--line); }
+    .notification-item p { color:#5e5366; }
+    .notification-rules,.assignment-list { border-color:var(--line); }
+    .notification-item.critical .notification-symbol { color:var(--red); background:var(--red-soft); }
+    .notification-item.warning .notification-symbol { color:var(--gold); background:var(--amber-soft); }
+    .notification-item.recovery .notification-symbol { color:var(--green); background:var(--green-soft); }
+    .telegram-state.ready { color:var(--green); background:var(--green-soft); border-color:#a8d4c1; }
+    .update-symbol { color:var(--gold); background:var(--amber-soft); border-radius:50%; }
+    .update-summary h2 { font-family:var(--display-font); font-size:20px; }
+    .upload-progress { background:#e5dccf; }
+    .upload-progress span { background:var(--gold); }
+    .toast { color:var(--cream); background:var(--ink); border:1px solid rgba(201,146,47,.55); border-radius:6px; }
+    dialog { color:var(--ink); background:var(--paper); border:1px solid var(--line); border-radius:6px; box-shadow:0 24px 70px rgba(30,19,51,.28); }
+    dialog::backdrop { background:rgba(30,19,51,.64); }
+    .modal-head,.modal-foot { border-color:var(--line); }
+    .modal-head h2 { font-family:var(--display-font); font-size:20px; font-weight:600; }
+    .close { color:var(--muted); border-radius:50%; }
+    .login-shell { background:var(--ink); }
+    .login-panel { background:var(--paper); border-left-color:rgba(201,146,47,.65); }
+    .login-brand-copy strong { color:var(--ink); font-family:var(--display-font); font-size:18px; }
+    .login-brand-copy span { color:var(--gold); font-family:var(--mono-font); font-size:9px; }
+    .login-form h1 { color:var(--ink); font-family:var(--display-font); font-size:34px; font-weight:600; }
+    .login-form > p { color:var(--muted); font-family:var(--mono-font); font-size:11px; }
+    .login-input input { background:#fffdf7; }
+    .login-submit { color:var(--cream); background:var(--ink); border-color:var(--ink); }
+    .login-submit:hover { color:var(--ink); background:var(--gold); border-color:var(--gold); }
+    .login-visual::after { background:rgba(30,19,51,.3); }
+    .visual-credit { color:rgba(250,243,231,.66); }
+    .login-foot { color:#958b9b; font-family:var(--mono-font); font-size:9px; }
+    @media (max-width:900px) {
+      .login-shell { background:var(--paper); }
+      .login-panel { background:var(--paper); }
+    }
+    @media (max-width:760px) {
+      .topbar { height:60px; padding:0 13px; }
+      .topbar .brand span:last-child { font-size:inherit; }
+      .top-brand-copy small { display:none; }
+      .top-brand-copy strong { font-size:16px; }
+      .sidebar { top:auto; right:0; width:auto; height:68px; padding:7px 5px; background:var(--ink); border-top:1px solid rgba(201,146,47,.5); }
+      .nav-item { color:#bdb1c8; }
+      .nav-item.active { color:#f7dda8; background:rgba(201,146,47,.15); }
+      .nav-item.active::before { top:auto; right:15px; bottom:0; left:15px; width:auto; height:2px; }
+      .workspace { margin-left:0; padding:82px 12px 88px; background:#f3eee5; }
+      .page-head { padding-bottom:14px; }
+      .page-head h1 { font-size:28px; }
+      .metric { min-height:116px; }
+    }
   </style>
 </head>
 <body>
   <section id="login" class="login-shell">
     <div class="login-panel">
-      <div class="login-brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span class="login-brand-copy"><strong>Incus Control</strong><span>中文集群控制面板</span></span></div>
+      <div class="login-brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span class="login-brand-copy"><strong>Incus Control</strong><span>INCUS 基础设施控制台</span></span></div>
       <form id="loginForm" class="login-form">
         <h1>登录 Incus Control</h1>
         <p>管理员与授权用户入口</p>
@@ -359,7 +516,7 @@
 
   <section id="app" class="hidden">
     <header class="topbar">
-      <div class="brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span>Incus Control</span></div>
+      <div class="brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span class="top-brand-copy"><small>INCUS PLATFORM</small><strong>Incus Control</strong></span></div>
       <div class="top-actions"><span class="connection"><span class="connection-dot"></span><span id="onlineLabel">控制端在线</span></span><button id="openAdminAccount" class="btn small account-button" type="button" title="修改管理员密码" data-admin-only><i data-lucide="user-cog"></i><span>管理员账户</span></button><button id="globalRefresh" class="btn icon" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button><button id="logout" class="btn small" title="退出登录"><i data-lucide="log-out"></i><span>退出</span></button></div>
     </header>
     <aside class="sidebar">
@@ -379,7 +536,7 @@
 
     <main class="workspace">
       <section id="view-dashboard" class="view">
-        <div class="page-head"><div><h1>统计概览</h1><p id="updated">正在同步集群状态</p></div><div class="page-actions"><button class="btn primary" data-go="create" data-admin-only><i data-lucide="plus"></i>创建实例</button></div></div>
+        <div class="page-head"><div><span class="page-kicker">集群态势</span><h1>统计概览</h1><p id="updated">正在同步集群状态</p></div><div class="page-actions"><button class="btn primary" data-go="create" data-admin-only><i data-lucide="plus"></i>创建实例</button></div></div>
         <div class="metrics">
           <article class="metric blue"><div class="metric-top"><span>宿主机</span><span class="metric-icon"><i data-lucide="server"></i></span></div><strong id="metricNodes">-</strong><small id="metricNodesSub">-</small></article>
           <article class="metric green"><div class="metric-top"><span>实例总数</span><span class="metric-icon"><i data-lucide="box"></i></span></div><strong id="metricInstances">-</strong><small id="metricInstancesSub">-</small></article>
@@ -393,13 +550,13 @@
       </section>
 
       <section id="view-nodes" class="view hidden">
-        <div class="page-head"><div><h1>宿主机</h1><p>管理提供 CPU、内存和磁盘资源的 Incus 服务器</p></div><div class="page-actions"><span id="nodeLiveState" class="live-refresh-state"><span class="live-refresh-dot"></span><span id="nodeLiveStatus">进入页面后自动刷新</span></span><button class="btn primary" data-go="add-node"><i data-lucide="server-cog"></i>添加宿主机</button></div></div>
+        <div class="page-head"><div><span class="page-kicker">计算节点</span><h1>宿主机</h1><p>管理提供 CPU、内存和磁盘资源的 Incus 服务器</p></div><div class="page-actions"><span id="nodeLiveState" class="live-refresh-state"><span class="live-refresh-dot"></span><span id="nodeLiveStatus">进入页面后自动刷新</span></span><button class="btn primary" data-go="add-node"><i data-lucide="server-cog"></i>添加宿主机</button></div></div>
         <div id="nodeGrid" class="node-grid"></div>
         <div id="nodeEmpty" class="panel empty hidden"><i data-lucide="server-off"></i><div>尚未添加宿主机</div></div>
       </section>
 
       <section id="view-add-node" class="view hidden">
-        <div class="page-head"><div><h1>添加宿主机</h1><p>安装计算节点服务并建立 Incus 双向 TLS 信任</p></div></div>
+        <div class="page-head"><div><span class="page-kicker">节点接入</span><h1>添加宿主机</h1><p>安装计算节点服务并建立 Incus 双向 TLS 信任</p></div></div>
         <div class="onboarding">
           <section class="form-section"><div class="step-title"><span class="step-number">1</span><div><strong>在宿主机执行安装命令</strong><span>支持 Debian 12、Ubuntu 22.04 和 Ubuntu 24.04，请使用 root 权限</span></div></div><div class="command-field"><input id="nodeInstallCommand" value="curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootstrap-node.sh | sudo bash" readonly><button class="btn icon" type="button" data-copy-target="nodeInstallCommand" title="复制安装命令" aria-label="复制安装命令"><i data-lucide="copy"></i></button></div><div class="field-note">安装脚本会自动配置 Incus、NAT 实例网络和 default 存储池，最后输出节点地址与一次性 Token。</div></section>
           <form id="nodeForm" class="form-section node-form">
@@ -414,7 +571,7 @@
       </section>
 
       <section id="view-create" class="view hidden">
-        <div class="page-head"><div><h1>切割实例</h1><p>按宿主机剩余容量创建单台或批量系统实例</p></div></div>
+        <div class="page-head"><div><span class="page-kicker">资源编排</span><h1>切割实例</h1><p>按宿主机剩余容量创建单台或批量系统实例</p></div></div>
         <div class="create-tabs" role="tablist"><button type="button" class="create-tab active" data-create-mode="single">单个创建</button><button type="button" class="create-tab" data-create-mode="batch">批量创建</button></div>
         <form id="createForm" class="form-layout">
           <div class="form-stack">
@@ -429,17 +586,17 @@
       </section>
 
       <section id="view-instances" class="view hidden">
-        <div class="page-head"><div><h1>实例管理</h1><p id="instancePageDescription">查看和控制全部节点上的容器与虚拟机</p></div><div class="page-actions"><button class="btn primary" data-go="create" data-admin-only><i data-lucide="plus"></i>创建实例</button></div></div>
+        <div class="page-head"><div><span class="page-kicker">实例清单</span><h1>实例管理</h1><p id="instancePageDescription">查看和控制全部节点上的容器与虚拟机</p></div><div class="page-actions"><button class="btn primary" data-go="create" data-admin-only><i data-lucide="plus"></i>创建实例</button></div></div>
         <div class="panel"><div class="panel-head"><div class="filters"><input id="instanceSearch" type="search" placeholder="搜索实例或宿主机"><select id="instanceStatus"><option value="all">全部状态</option><option value="Running">运行中</option><option value="Stopped">已停止</option></select></div><button id="instanceRefresh" class="btn icon" title="刷新实例" aria-label="刷新实例"><i data-lucide="refresh-cw"></i></button></div><div class="table-wrap"><table><thead><tr><th>实例</th><th>宿主机</th><th>状态</th><th>IPv4</th><th>CPU</th><th>内存</th><th>磁盘</th><th>本月流量</th><th>业务端口</th><th>SSH 连接</th><th>操作</th></tr></thead><tbody id="instanceRows"></tbody></table><div id="instanceEmpty" class="empty hidden"><i data-lucide="package-open"></i><div>没有符合条件的实例</div></div></div></div>
       </section>
 
       <section id="view-users" class="view hidden">
-        <div class="page-head"><div><h1>用户管理</h1><p>创建普通账户，并按到期时间授权实例</p></div><div class="page-actions"><button class="btn primary" id="openUserCreate"><i data-lucide="user-plus"></i>创建账户</button></div></div>
+        <div class="page-head"><div><span class="page-kicker">账户与授权</span><h1>用户管理</h1><p>创建普通账户，并按到期时间授权实例</p></div><div class="page-actions"><button class="btn primary" id="openUserCreate"><i data-lucide="user-plus"></i>创建账户</button></div></div>
         <div class="panel"><div class="table-wrap"><table><thead><tr><th>用户</th><th>状态</th><th>有效授权</th><th>最近到期</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="userRows"></tbody></table><div id="userEmpty" class="empty hidden"><i data-lucide="users"></i><div>尚未创建普通账户</div></div></div></div>
       </section>
 
       <section id="view-notifications" class="view hidden">
-        <div class="page-head"><div><h1>异常通知</h1><p>持续巡检宿主机和实例状态，并按规则推送 Telegram</p></div><div class="page-actions"><button class="btn" id="notificationRead"><i data-lucide="check-check"></i>全部已读</button><button class="btn primary" id="notificationScan"><i data-lucide="scan-line"></i>立即巡检</button></div></div>
+        <div class="page-head"><div><span class="page-kicker">运行告警</span><h1>异常通知</h1><p>持续巡检宿主机和实例状态，并按规则推送 Telegram</p></div><div class="page-actions"><button class="btn" id="notificationRead"><i data-lucide="check-check"></i>全部已读</button><button class="btn primary" id="notificationScan"><i data-lucide="scan-line"></i>立即巡检</button></div></div>
         <div class="metrics">
           <article class="metric amber"><div class="metric-top"><span>当前异常</span><span class="metric-icon"><i data-lucide="triangle-alert"></i></span></div><strong id="notificationActiveCount">0</strong><small id="notificationActiveSub">当前未发现异常</small></article>
           <article class="metric gray"><div class="metric-top"><span>未读事件</span><span class="metric-icon"><i data-lucide="mail-warning"></i></span></div><strong id="notificationUnreadCount">0</strong><small>异常与恢复事件</small></article>
@@ -466,19 +623,19 @@
       </section>
 
       <section id="view-images" class="view hidden">
-        <div class="page-head"><div><h1>镜像管理</h1><p>管理公共系统目录和各宿主机本地镜像</p></div><div class="page-actions image-toolbar"><select id="imageNode"></select><button class="btn primary" id="openImageUpload"><i data-lucide="upload"></i>导入本地镜像</button></div></div>
+        <div class="page-head"><div><span class="page-kicker">系统镜像</span><h1>镜像管理</h1><p>管理公共系统目录和各宿主机本地镜像</p></div><div class="page-actions image-toolbar"><select id="imageNode"></select><button class="btn primary" id="openImageUpload"><i data-lucide="upload"></i>导入本地镜像</button></div></div>
         <div class="image-tabs"><button class="image-tab active" data-image-tab="local">本地镜像</button><button class="image-tab" data-image-tab="public">公共镜像目录</button></div>
         <div id="imageLocalPanel" class="panel"><div class="table-wrap"><table><thead><tr><th>镜像</th><th>类型</th><th>架构</th><th>体积</th><th>指纹</th><th>操作</th></tr></thead><tbody id="localImageRows"></tbody></table><div id="localImageEmpty" class="empty hidden"><i data-lucide="disc-3"></i><div>该宿主机还没有本地镜像</div></div></div></div>
         <div id="imagePublicPanel" class="hidden"><div id="publicImageGrid" class="image-catalog"></div></div>
       </section>
 
       <section id="view-operations" class="view hidden">
-        <div class="page-head"><div><h1>操作日志</h1><p>追踪节点接入和实例生命周期操作</p></div></div>
+        <div class="page-head"><div><span class="page-kicker">审计轨迹</span><h1>操作日志</h1><p>追踪节点接入和实例生命周期操作</p></div></div>
         <div class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>结果</th><th>操作</th><th>目标</th><th>节点</th><th>信息</th></tr></thead><tbody id="operationRows"></tbody></table><div id="operationEmpty" class="empty hidden"><i data-lucide="scroll-text"></i><div>暂无操作记录</div></div></div></div>
       </section>
 
       <section id="view-updates" class="view hidden">
-        <div class="page-head"><div><h1>版本更新</h1><p>检查并安装 Incus Control 最新稳定版本</p></div></div>
+        <div class="page-head"><div><span class="page-kicker">发布通道</span><h1>版本更新</h1><p>检查并安装 Incus Control 最新稳定版本</p></div></div>
         <section class="panel update-panel">
           <div class="update-summary"><span class="update-symbol"><i data-lucide="package-check"></i></span><div><h2 id="updateHeadline">正在读取版本信息</h2><p id="updateDescription">当前版本与 GitHub main 分支进行比较</p></div></div>
           <div class="update-facts"><div class="update-fact"><span>当前版本</span><strong id="currentVersion">-</strong></div><div class="update-fact"><span>最新版本</span><strong id="latestVersion">尚未检查</strong></div><div class="update-fact"><span>更新通道</span><strong>GitHub · main</strong></div></div>
