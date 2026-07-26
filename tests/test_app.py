@@ -22,8 +22,8 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.6.2")
-        self.assertLess(app.version_tuple("1.6.2"), app.version_tuple("1.7.0"))
+        self.assertEqual(app.APP_VERSION, "1.6.3")
+        self.assertLess(app.version_tuple("1.6.3"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
         response.read.return_value = b"1.7.0\n"
         response.__enter__.return_value = response
@@ -115,7 +115,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "1.6.2")
+                self.assertEqual(data["panel_version"], "1.6.3")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -894,6 +894,9 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("月流量配额", app.HTML)
         self.assertIn('id="applySmartPlan"', app.HTML)
         self.assertIn('id="smartPlanText"', app.HTML)
+        self.assertIn('id="cpuPolicyText"', app.HTML)
+        self.assertIn("100% = 1 核", app.HTML)
+        self.assertIn("KVM 分配", app.HTML)
         self.assertIn("function smartResourcePlan", app.HTML)
         self.assertIn("function smartImageForPlan", app.HTML)
         self.assertIn("applySmartConfiguration({selectImage:!smartImageLocked})", app.HTML)
@@ -1270,8 +1273,8 @@ class ValidationTests(unittest.TestCase):
                 "name": "web-01",
                 "type": "container",
                 "image": "images:alpine/edge",
-                "cpu": "1",
-                "cpu_allowance": "50",
+                "cpu": "2",
+                "cpu_allowance": "150",
                 "memory": "256MiB",
                 "disk": "2GiB",
                 "ingress": "100Mbit",
@@ -1292,6 +1295,8 @@ class ValidationTests(unittest.TestCase):
             "node-hk-01", "web-01", 500 * 1024**3, "stop", reset=True,
         )
         init_call = next(call for call in run_incus.call_args_list if call.args[0] == "init")
+        self.assertIn("limits.cpu=2", init_call.args)
+        self.assertIn("limits.cpu.allowance=150ms/100ms", init_call.args)
         self.assertIn(f"user.incus-cn-panel.traffic-limit-bytes={500 * 1024**3}", init_call.args)
         self.assertIn("user.incus-cn-panel.traffic-action=stop", init_call.args)
         self.assertIn(
@@ -1342,6 +1347,40 @@ class ValidationTests(unittest.TestCase):
             call.args[:5] == ("config", "device", "override", "node-a:free-io", "eth0")
             for call in calls
         ))
+
+    def test_virtual_machine_uses_vcpu_without_container_allowance(self):
+        with (
+            mock.patch("app.run_incus") as run_incus,
+            mock.patch("app.require_node", return_value="node-a"),
+            mock.patch("app.allocate_ssh_port", return_value="22000"),
+            mock.patch("app.generate_ssh_password", return_value="generated-password"),
+            mock.patch("app.provision_ssh"),
+            mock.patch("app.node_host", return_value="203.0.113.10"),
+            mock.patch("app.save_instance_credentials"),
+        ):
+            app.create_instance({
+                "node": "node-a", "name": "vm-cpu", "type": "virtual-machine",
+                "image": "images:alpine/edge", "cpu": "2", "cpu_allowance": "0",
+                "memory": "1GiB", "disk": "4GiB", "ingress": "", "egress": "",
+                "read_iops": "0", "write_iops": "0", "ssh_port": "",
+            })
+        init_call = next(call for call in run_incus.call_args_list if call.args[0] == "init")
+        self.assertIn("--vm", init_call.args)
+        self.assertIn("limits.cpu=2", init_call.args)
+        self.assertFalse(any(
+            str(argument).startswith("limits.cpu.allowance=")
+            for argument in init_call.args
+        ))
+
+    def test_container_cpu_hard_limit_cannot_exceed_visible_vcpus(self):
+        with mock.patch("app.require_node", return_value="node-a"):
+            with self.assertRaisesRegex(ValueError, "1% 到 100%"):
+                app.create_instance({
+                    "node": "node-a", "name": "cpu-over", "type": "container",
+                    "image": "images:alpine/edge", "cpu": "1",
+                    "cpu_allowance": "101", "memory": "256MiB", "disk": "2GiB",
+                    "read_iops": "0", "write_iops": "0",
+                })
 
     def test_batch_creation_uses_padded_names_and_capacity_limit(self):
         node_info = {

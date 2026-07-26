@@ -2368,8 +2368,11 @@ def create_instance(data):
         raise ValueError("实例类型无效")
     if not cpu.isdigit() or not 1 <= int(cpu) <= 128:
         raise ValueError("CPU 核心数无效")
-    if not cpu_allowance.isdigit() or not 1 <= int(cpu_allowance) <= 100:
-        raise ValueError("CPU 配额无效")
+    if kind == "container" and (
+        not cpu_allowance.isdigit()
+        or not 1 <= int(cpu_allowance) <= int(cpu) * 100
+    ):
+        raise ValueError(f"LXC CPU 硬上限必须在 1% 到 {int(cpu) * 100}% 之间")
     if not SIZE_RE.fullmatch(memory) or not SIZE_RE.fullmatch(disk):
         raise ValueError("内存或磁盘格式无效")
     resolved_image = resolve_image(node, image, kind)
@@ -2406,9 +2409,10 @@ def create_instance(data):
         init_args = ["init", resolved_image["reference"], ref]
         if kind == "virtual-machine":
             init_args.append("--vm")
+        init_args.extend(["-c", f"limits.cpu={cpu}"])
+        if kind == "container":
+            init_args.extend(["-c", f"limits.cpu.allowance={cpu_allowance}ms/100ms"])
         init_args.extend([
-            "-c", f"limits.cpu={cpu}",
-            "-c", f"limits.cpu.allowance={cpu_allowance}%",
             "-c", f"limits.memory={memory}",
             "-c", f"user.incus-cn-panel.image={image}",
         ])
