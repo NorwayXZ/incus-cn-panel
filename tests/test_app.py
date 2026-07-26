@@ -22,8 +22,8 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.6.1")
-        self.assertLess(app.version_tuple("1.6.1"), app.version_tuple("1.7.0"))
+        self.assertEqual(app.APP_VERSION, "1.6.2")
+        self.assertLess(app.version_tuple("1.6.2"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
         response.read.return_value = b"1.7.0\n"
         response.__enter__.return_value = response
@@ -115,7 +115,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "1.6.1")
+                self.assertEqual(data["panel_version"], "1.6.2")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -892,6 +892,12 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("切割实例", app.HTML)
         self.assertIn("添加宿主机", app.HTML)
         self.assertIn("月流量配额", app.HTML)
+        self.assertIn('id="applySmartPlan"', app.HTML)
+        self.assertIn('id="smartPlanText"', app.HTML)
+        self.assertIn("function smartResourcePlan", app.HTML)
+        self.assertIn("function smartImageForPlan", app.HTML)
+        self.assertIn("applySmartConfiguration({selectImage:!smartImageLocked})", app.HTML)
+        self.assertNotIn("count>capacityMaximum||count===previous", app.HTML)
         for element_id in ("summaryCheck", "batchNameRange", "remainingMemory", "remainingDisk"):
             self.assertIn(f'id="{element_id}"', app.HTML)
         self.assertIn('id="trafficDialog"', app.HTML)

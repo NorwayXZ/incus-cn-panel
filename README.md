@@ -27,6 +27,7 @@
 - 将 Incus 统一镜像 tar 导入指定宿主机，并直接使用本地镜像创建实例
 - 按发行版和 LXC/KVM 显示最低、推荐内存与磁盘，支持一键应用推荐规格
 - 按宿主机剩余内存、存储池空间和 SSH 端口自动计算批量创建上限
+- 按创建数量智能选择稳定系统并均衡 CPU 核心、CPU 使用上限、内存和磁盘；切换系统后按该镜像最低规格重新规划
 - 创建前实时检查镜像最低规格、重复名称、SSH/业务端口冲突，并显示本次资源占用与创建后余量
 - 设置 CPU 核数与使用上限、内存和磁盘；读写 IOPS 与上下行带宽可选择不限制或自定义
 - 创建单台或批量实例时可设置每月双向流量配额；批量支持每台相同配额或输入本批总量后平均分配
@@ -100,6 +101,8 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 脚本会安装 Incus，初始化 `dir` 存储池和 NAT 网桥，并输出节点地址与一次性 Trust Token。登录控制面板，打开“添加宿主机”，可以将脚本最后输出的节点地址与 Token 两行完整粘贴到凭据框，面板会自动识别地址。成功接入后可以删除节点上的 `/root/incus-node-token.txt`。
 
 批量创建使用名称前缀、起始编号和补零位数生成实例名，例如 `vps-001` 至 `vps-010`。CPU 由 Incus 共享调度，单台配置不能超过宿主机物理核心数；批量上限由剩余内存、default 存储池空间和 SSH 端口数量的最小值决定。服务端会在开始批量任务前重新计算容量，任务中途失败时会尝试清理本批已经创建的实例。
+
+智能配置默认将当前可分配内存和磁盘的 90% 按创建数量均分，保留约 10% 供宿主机和运行波动使用；CPU 核心按物理核心公平分配，CPU 使用上限按本批总配额计算。公共镜像优先选择 Debian 12，资源不足时选择 Alpine 3.22。管理员手动切换系统后，系统会保留所选镜像并重新计算规格；如果该镜像的最低规格无法容纳指定数量，页面会保留原数量、禁用创建并显示实际最大数量，不会静默减少实例数量。
 
 操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，管理员密码哈希保存在 `/var/lib/incus-cn-panel/password.env`，实例 SSH 凭据保存在 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`，这些敏感文件权限均为 `0600`。再次运行控制端安装命令会原地升级并保留这些数据。
 
