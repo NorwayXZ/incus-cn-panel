@@ -217,6 +217,9 @@ class ValidationTests(unittest.TestCase):
                 "node": "node-a", "name": "no-ip", "status": "Running", "ipv4": "",
                 "memory_used_bytes": 95, "memory_total_bytes": 100,
                 "cpu_usage_ns": 61_000_000_000, "cpu_allocated_ns": 1_000_000_000,
+                "traffic_exceeded": True, "traffic_action": "stop",
+                "traffic_used_bytes": 600 * 1024**3,
+                "traffic_limit_bytes": 500 * 1024**3,
             },
         ]
         previous = {
@@ -240,10 +243,124 @@ class ValidationTests(unittest.TestCase):
             "instance_not_running:node-a/stopped",
             "instance_no_ipv4:node-a/no-ip",
             "instance_missing:node-a/missing",
+            "instance_traffic_exceeded:node-a/no-ip",
         })
         self.assertTrue(snapshot["initialized"])
         first_scan, _ = app.detect_anomalies(nodes, instances, config, {})
         self.assertNotIn("instance_missing:node-a/missing", first_scan)
+
+    def test_traffic_usage_accumulates_and_stops_exceeded_instance(self):
+        old_values = (app.DATA_DIR, app.TRAFFIC_FILE, app.OPERATIONS_FILE)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.TRAFFIC_FILE = os.path.join(directory, "traffic-usage.json")
+                app.OPERATIONS_FILE = os.path.join(directory, "operations.jsonl")
+                limit = 1024**3
+                app.initialize_traffic_usage(
+                    "node-a", "web-01", limit, "stop",
+                    rx_bytes=100 * 1024**2, tx_bytes=50 * 1024**2,
+                )
+                instances = [{
+                    "node": "node-a", "name": "web-01", "status": "Running",
+                    "traffic_limit_bytes": limit, "traffic_action": "stop",
+                    "network_rx_bytes": 700 * 1024**2,
+                    "network_tx_bytes": 650 * 1024**2,
+                }]
+                with mock.patch("app.run_incus") as run_incus:
+                    app.update_traffic_usage(instances)
+                run_incus.assert_called_once_with(
+                    "stop", "node-a:web-01", "--force", timeout=180,
+                )
+                self.assertTrue(instances[0]["traffic_exceeded"])
+                self.assertGreater(instances[0]["traffic_used_bytes"], limit)
+                data = app.read_traffic_data()
+                record = data["instances"]["node-a/web-01"]
+                self.assertTrue(record["enforced_at"])
+                self.assertEqual(os.stat(app.TRAFFIC_FILE).st_mode & 0o777, 0o600)
+        finally:
+            app.DATA_DIR, app.TRAFFIC_FILE, app.OPERATIONS_FILE = old_values
+
+    def test_traffic_new_month_resets_usage_without_replaying_counters(self):
+        old_values = (app.DATA_DIR, app.TRAFFIC_FILE)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.TRAFFIC_FILE = os.path.join(directory, "traffic-usage.json")
+                app.initialize_traffic_usage("node-a", "web-01", 1024**3, "stop")
+                data = app.read_traffic_data()
+                data["instances"]["node-a/web-01"].update({
+                    "period": "2000-01", "used_bytes": 2 * 1024**3,
+                    "last_rx_bytes": 5000, "last_tx_bytes": 5000,
+                })
+                with app.TRAFFIC_LOCK:
+                    app._write_traffic_data(data)
+                instances = [{
+                    "node": "node-a", "name": "web-01", "status": "Stopped",
+                    "traffic_limit_bytes": 1024**3, "traffic_action": "stop",
+                    "network_rx_bytes": 9000, "network_tx_bytes": 9000,
+                }]
+                app.update_traffic_usage(instances)
+                self.assertEqual(instances[0]["traffic_used_bytes"], 0)
+                self.assertFalse(instances[0]["traffic_exceeded"])
+                record = app.read_traffic_data()["instances"]["node-a/web-01"]
+                self.assertEqual(record["last_rx_bytes"], 9000)
+                self.assertEqual(record["last_tx_bytes"], 9000)
+        finally:
+            app.DATA_DIR, app.TRAFFIC_FILE = old_values
+
+    def test_traffic_quota_validation(self):
+        self.assertEqual(
+            app.validate_traffic_quota(500 * 1024**3, "stop"),
+            (500 * 1024**3, "stop"),
+        )
+        self.assertEqual(app.validate_traffic_quota(0, "notify"), (0, "notify"))
+        with self.assertRaisesRegex(ValueError, "1 GiB"):
+            app.validate_traffic_quota(1024**2, "stop")
+        with self.assertRaisesRegex(ValueError, "处理方式"):
+            app.validate_traffic_quota(1024**3, "delete")
+
+    def test_update_instance_traffic_quota_sets_metadata_and_baseline(self):
+        old_values = (app.DATA_DIR, app.TRAFFIC_FILE)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.TRAFFIC_FILE = os.path.join(directory, "traffic-usage.json")
+                instance = {
+                    "name": "web-01", "type": "container", "status": "Running",
+                    "config": {}, "expanded_devices": {},
+                }
+                state = {"network": {"eth0": {
+                    "type": "broadcast",
+                    "counters": {"bytes_received": 1234, "bytes_sent": 5678},
+                }}}
+                with (
+                    mock.patch("app.require_node", return_value="node-a"),
+                    mock.patch("app.run_incus", side_effect=[
+                        json.dumps(instance), None, None, json.dumps(state),
+                    ]) as run_incus,
+                ):
+                    result = app.update_instance_traffic_quota(
+                        "node-a", "web-01", 500 * 1024**3, "notify", True,
+                    )
+                self.assertEqual(result["limit_bytes"], 500 * 1024**3)
+                self.assertEqual(result["action"], "notify")
+                self.assertEqual(run_incus.call_args_list[1:3], [
+                    mock.call(
+                        "config", "set", "node-a:web-01",
+                        "user.incus-cn-panel.traffic-limit-bytes", str(500 * 1024**3),
+                    ),
+                    mock.call(
+                        "config", "set", "node-a:web-01",
+                        "user.incus-cn-panel.traffic-action", "notify",
+                    ),
+                ])
+                record = app.read_traffic_data()["instances"]["node-a/web-01"]
+                self.assertEqual(record["last_rx_bytes"], 1234)
+                self.assertEqual(record["last_tx_bytes"], 5678)
+                self.assertEqual(record["used_bytes"], 0)
+        finally:
+            app.DATA_DIR, app.TRAFFIC_FILE = old_values
 
     def test_notification_events_are_deduplicated_and_resolved(self):
         old_values = (
@@ -388,10 +505,14 @@ class ValidationTests(unittest.TestCase):
                      mock.patch("app.instance_credentials", return_value={"username": "root"}), \
                      mock.patch("app.record_operation"), \
                      mock.patch("app.run_incus") as run_incus:
+                    run_incus.side_effect = [json.dumps({"config": {}}), None]
                     self.assertEqual(request("GET", "/api/users")[0], 403)
                     self.assertEqual(request("GET", "/api/notifications")[0], 403)
                     self.assertEqual(request("POST", "/api/instances", {})[0], 403)
                     self.assertEqual(request("POST", "/api/notifications/scan", {})[0], 403)
+                    self.assertEqual(request(
+                        "POST", "/api/nodes/node-a/instances/web-01/traffic", {},
+                    )[0], 403)
                     self.assertEqual(request("DELETE", "/api/users/customer-03")[0], 403)
                     status, data = request(
                         "GET", "/api/nodes/node-a/instances/web-01/access"
@@ -407,9 +528,12 @@ class ValidationTests(unittest.TestCase):
                         "/api/nodes/node-a/instances/web-01/action",
                         {"action": "restart"},
                     )[0], 200)
-                    run_incus.assert_called_once_with(
-                        "restart", "node-a:web-01", "--force", timeout=180
-                    )
+                    self.assertEqual(run_incus.call_args_list, [
+                        mock.call(
+                            "query", "node-a:/1.0/instances/web-01?recursion=1", timeout=20,
+                        ),
+                        mock.call("restart", "node-a:web-01", "--force", timeout=180),
+                    ])
 
                     past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
                     app.update_user_account("customer-03", assignments=[
@@ -431,6 +555,11 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("Incus Control", app.HTML)
         self.assertIn("切割实例", app.HTML)
         self.assertIn("添加宿主机", app.HTML)
+        self.assertIn("月流量配额", app.HTML)
+        self.assertIn('id="trafficDialog"', app.HTML)
+        self.assertIn('id="managedTrafficValue" type="number" min="1" max="1048576" step="any"', app.HTML)
+        self.assertIn("String(Math.round(Number($('managedTrafficValue').value)*multiplier))", app.HTML)
+        self.assertIn('data-traffic-instance=', app.HTML)
         self.assertIn('data-view="operations"', app.HTML)
         self.assertIn("location.pathname", app.HTML)
         self.assertIn("apiBase+path", app.HTML)
@@ -523,11 +652,22 @@ class ValidationTests(unittest.TestCase):
                 "user.incus-cn-panel.ssh-port": "22001",
                 "user.incus-cn-panel.port-start": "10000",
                 "user.incus-cn-panel.port-end": "10010",
+                "user.incus-cn-panel.traffic-limit-bytes": str(500 * 1024**3),
+                "user.incus-cn-panel.traffic-action": "stop",
             },
             "expanded_devices": {
                 "root": {"type": "disk", "path": "/", "size": "2GiB"},
             },
-            "state": {"network": {}},
+            "state": {"network": {
+                "eth0": {
+                    "type": "broadcast",
+                    "counters": {"bytes_received": 1200, "bytes_sent": 300},
+                },
+                "lo": {
+                    "type": "loopback",
+                    "counters": {"bytes_received": 9999, "bytes_sent": 9999},
+                },
+            }},
         }])
         self.assertEqual(instances[0]["disk"], "2GiB")
         self.assertEqual(instances[0]["cpu_allowance"], "50%")
@@ -537,6 +677,10 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(instances[0]["port_end"], "10010")
         self.assertEqual(instances[0]["memory_used_bytes"], 0)
         self.assertEqual(instances[0]["cpu_usage_ns"], 0)
+        self.assertEqual(instances[0]["traffic_limit_bytes"], 500 * 1024**3)
+        self.assertEqual(instances[0]["traffic_action"], "stop")
+        self.assertEqual(instances[0]["network_rx_bytes"], 1200)
+        self.assertEqual(instances[0]["network_tx_bytes"], 300)
 
     def test_operation_log_is_persistent_and_newest_first(self):
         old_values = (app.DATA_DIR, app.OPERATIONS_FILE)
@@ -686,6 +830,7 @@ class ValidationTests(unittest.TestCase):
             mock.patch("app.provision_ssh") as provision_ssh,
             mock.patch("app.node_host", return_value="203.0.113.10"),
             mock.patch("app.save_instance_credentials") as save_credentials,
+            mock.patch("app.initialize_traffic_usage") as initialize_traffic,
         ):
             run_incus.return_value = "[]"
             result = app.create_instance({
@@ -704,11 +849,19 @@ class ValidationTests(unittest.TestCase):
                 "ssh_port": "22001",
                 "port_start": "10000",
                 "port_end": "10010",
+                "traffic_limit_bytes": str(500 * 1024**3),
+                "traffic_action": "stop",
             })
         self.assertEqual(result, ("node-hk-01", "web-01", access))
         port_is_used.assert_called_once_with("node-hk-01", "22001")
         provision_ssh.assert_called_once_with("node-hk-01:web-01", "generated-password")
         save_credentials.assert_called_once_with("node-hk-01", "web-01", access)
+        initialize_traffic.assert_called_once_with(
+            "node-hk-01", "web-01", 500 * 1024**3, "stop", reset=True,
+        )
+        init_call = next(call for call in run_incus.call_args_list if call.args[0] == "init")
+        self.assertIn(f"user.incus-cn-panel.traffic-limit-bytes={500 * 1024**3}", init_call.args)
+        self.assertIn("user.incus-cn-panel.traffic-action=stop", init_call.args)
         self.assertIn(
             mock.call(
                 "config", "device", "add", "node-hk-01:web-01", "ssh", "proxy",
@@ -780,6 +933,9 @@ class ValidationTests(unittest.TestCase):
                 "padding": 3, "count": 2, "cpu": "1", "memory": "256MiB",
                 "disk": "2GiB", "port_pool_start": "10000",
                 "port_pool_end": "10009", "port_count": "3",
+                "traffic_allocation": "batch_total",
+                "traffic_total_bytes": str(500 * 1024**3),
+                "traffic_action": "stop",
             })
         self.assertEqual(node, "node-a")
         self.assertEqual([item["name"] for item in created], ["vps-007", "vps-008"])
@@ -790,6 +946,10 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(
             [(call.args[0]["port_start"], call.args[0]["port_end"]) for call in create_mock.call_args_list],
             [(10000, 10002), (10003, 10005)],
+        )
+        self.assertEqual(
+            [call.args[0]["traffic_limit_bytes"] for call in create_mock.call_args_list],
+            [str(250 * 1024**3), str(250 * 1024**3)],
         )
 
         with (

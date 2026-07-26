@@ -27,6 +27,8 @@
 - 按发行版和 LXC/KVM 显示最低、推荐内存与磁盘，支持一键应用推荐规格
 - 按宿主机剩余内存、存储池空间和 SSH 端口自动计算批量创建上限
 - 设置 CPU 核数与使用上限、内存和磁盘；读写 IOPS 与上下行带宽可选择不限制或自定义
+- 创建单台或批量实例时可设置每月双向流量配额；批量支持每台相同配额或输入本批总量后平均分配
+- 控制端每分钟累计实例网卡流量，按 Asia/Shanghai 自然月重置，超额后可自动停止实例或仅发送通知
 - 单个实例可分配连续业务端口段；批量创建可按总端口池和每台端口数自动切分无冲突区间
 - 自动安装 OpenSSH，将宿主机 TCP 端口映射到实例 `22` 端口，并生成 root 登录密码
 - 为旧实例补开 SSH，集中查看和复制宿主机地址、端口、账号、密码与连接命令
@@ -93,7 +95,9 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 
 批量创建使用名称前缀、起始编号和补零位数生成实例名，例如 `vps-001` 至 `vps-010`。CPU 由 Incus 共享调度，单台配置不能超过宿主机物理核心数；批量上限由剩余内存、default 存储池空间和 SSH 端口数量的最小值决定。服务端会在开始批量任务前重新计算容量，任务中途失败时会尝试清理本批已经创建的实例。
 
-操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，实例 SSH 凭据保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，两者权限均为 `0600`。再次运行控制端安装命令会原地升级并保留这些数据。
+操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，实例 SSH 凭据保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，这些文件权限均为 `0600`。再次运行控制端安装命令会原地升级并保留这些数据。
+
+月流量按实例所有非回环网卡的接收与发送字节合计计算。计数器每分钟持久化一次，实例或控制端重启后会继续累计；因此超额处置最多存在一个巡检周期的流量偏差。自动停止模式下，超额实例在提高配额、重置本月用量或进入下一个自然月前不能从面板重新启动。
 
 ## Telegram 通知
 

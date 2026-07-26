@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 
 HOST = os.environ.get("PANEL_HOST", "127.0.0.1")
@@ -35,6 +36,7 @@ CREDENTIALS_FILE = os.path.join(DATA_DIR, "credentials.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 NOTIFICATION_CONFIG_FILE = os.path.join(DATA_DIR, "notification-config.json")
 NOTIFICATIONS_FILE = os.path.join(DATA_DIR, "notifications.json")
+TRAFFIC_FILE = os.path.join(DATA_DIR, "traffic-usage.json")
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 SESSIONS = {}
 LOGIN_ATTEMPTS = {}
@@ -44,6 +46,7 @@ OPERATION_LOCK = threading.Lock()
 CREDENTIALS_LOCK = threading.Lock()
 USERS_LOCK = threading.Lock()
 NOTIFICATION_LOCK = threading.RLock()
+TRAFFIC_LOCK = threading.RLock()
 MONITOR_SCAN_LOCK = threading.Lock()
 MONITOR_WAKE_EVENT = threading.Event()
 SESSION_TTL = 12 * 60 * 60
@@ -63,6 +66,8 @@ USER_PASSWORD_ITERATIONS = 260000
 MAX_USER_ASSIGNMENTS = 500
 MAX_JSON_BODY_BYTES = 128 * 1024
 MAX_NOTIFICATION_EVENTS = 500
+MAX_TRAFFIC_LIMIT_BYTES = 1024**5
+PANEL_TIMEZONE = ZoneInfo(os.environ.get("PANEL_TIMEZONE", "Asia/Shanghai"))
 MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", str(8 * 1024**3)))
 RESOURCE_PROFILES = {
     "alpine": {
@@ -163,6 +168,12 @@ ALERT_RULES = {
         "description": "检测到实例被外部删除或未被 Incus 返回；首次巡检不会触发。",
         "severity": "critical",
         "default_mode": "off",
+    },
+    "instance_traffic_exceeded": {
+        "label": "实例本月流量超过配额",
+        "description": "按实例网卡接收与发送字节合计统计，超过配额后按实例设置处置。",
+        "severity": "critical",
+        "default_mode": "panel_telegram",
     },
 }
 
@@ -584,6 +595,8 @@ def add_remote(name, address, token):
 
 def format_bytes(value):
     value = int(value or 0)
+    if value >= 1024**4:
+        return f"{value / 1024**4:.2f} TiB"
     if value >= 1024**3:
         return f"{value / 1024**3:.1f} GiB"
     return f"{value / 1024**2:.0f} MiB"
@@ -649,8 +662,14 @@ def parse_instances(node, raw):
         state = item.get("state") or {}
         memory_state = state.get("memory") or {}
         cpu_state = state.get("cpu") or {}
+        network_rx_bytes = 0
+        network_tx_bytes = 0
         ipv4 = ""
-        for interface in (state.get("network") or {}).values():
+        for interface_name, interface in (state.get("network") or {}).items():
+            if interface_name != "lo" and interface.get("type") != "loopback":
+                counters = interface.get("counters") or {}
+                network_rx_bytes += int(counters.get("bytes_received", 0) or 0)
+                network_tx_bytes += int(counters.get("bytes_sent", 0) or 0)
             for address in interface.get("addresses", []):
                 if address.get("family") == "inet" and address.get("scope") == "global":
                     ipv4 = address.get("address", "")
@@ -677,6 +696,14 @@ def parse_instances(node, raw):
             "ssh_port": config.get("user.incus-cn-panel.ssh-port", ""),
             "port_start": config.get("user.incus-cn-panel.port-start", ""),
             "port_end": config.get("user.incus-cn-panel.port-end", ""),
+            "traffic_limit_bytes": int(
+                config.get("user.incus-cn-panel.traffic-limit-bytes", 0) or 0
+            ),
+            "traffic_action": config.get(
+                "user.incus-cn-panel.traffic-action", "stop"
+            ),
+            "network_rx_bytes": network_rx_bytes,
+            "network_tx_bytes": network_tx_bytes,
             "memory_used_bytes": int(memory_state.get("usage", 0) or 0),
             "memory_total_bytes": int(memory_state.get("total", 0) or 0),
             "cpu_usage_ns": int(cpu_state.get("usage", 0) or 0),
@@ -927,6 +954,7 @@ def overview():
         nodes = list(executor.map(lambda item: inspect_node(*item), remotes.items()))
     nodes.sort(key=lambda item: item["name"])
     instances = [instance for node in nodes for instance in node.pop("instances")]
+    attach_traffic_usage(instances)
     return nodes, instances
 
 
@@ -992,6 +1020,235 @@ def _write_private_json(path, data):
         except FileNotFoundError:
             pass
         raise
+
+
+def traffic_period(now=None):
+    now = now or datetime.now(PANEL_TIMEZONE)
+    return now.astimezone(PANEL_TIMEZONE).strftime("%Y-%m")
+
+
+def default_traffic_data():
+    return {"version": 1, "instances": {}}
+
+
+def read_traffic_data():
+    with TRAFFIC_LOCK:
+        data = _read_private_json(TRAFFIC_FILE, default_traffic_data())
+    if not isinstance(data.get("instances"), dict):
+        data["instances"] = {}
+    return data
+
+
+def _write_traffic_data(data):
+    data["version"] = 1
+    _write_private_json(TRAFFIC_FILE, data)
+
+
+def _traffic_key(node, name):
+    return f"{node}/{name}"
+
+
+def _counter_delta(current, previous):
+    current = max(0, int(current or 0))
+    previous = max(0, int(previous or 0))
+    return current - previous if current >= previous else current
+
+
+def validate_traffic_quota(limit_value, action="stop"):
+    try:
+        limit = int(str(limit_value or "0"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("月流量配额无效") from exc
+    if limit and not 1024**3 <= limit <= MAX_TRAFFIC_LIMIT_BYTES:
+        raise ValueError("月流量配额必须在 1 GiB 到 1 PiB 之间")
+    action = str(action or "stop")
+    if action not in {"stop", "notify"}:
+        raise ValueError("流量超额处理方式无效")
+    return limit, action
+
+
+def attach_traffic_usage(instances):
+    data = read_traffic_data()
+    period = traffic_period()
+    records = data["instances"]
+    for instance in instances:
+        limit = int(instance.get("traffic_limit_bytes", 0) or 0)
+        record = records.get(_traffic_key(instance["node"], instance["name"]), {})
+        used = int(record.get("used_bytes", 0) or 0) if record.get("period") == period else 0
+        instance.update({
+            "traffic_period": period,
+            "traffic_used_bytes": used,
+            "traffic_remaining_bytes": max(0, limit - used) if limit else 0,
+            "traffic_exceeded": bool(limit and used >= limit),
+            "traffic_enforced_at": record.get("enforced_at", "") if used >= limit else "",
+            "traffic_error": record.get("last_error", "") if used >= limit else "",
+        })
+    return instances
+
+
+def initialize_traffic_usage(node, name, limit, action, rx_bytes=0, tx_bytes=0, reset=True):
+    key = _traffic_key(node, name)
+    with TRAFFIC_LOCK:
+        data = _read_private_json(TRAFFIC_FILE, default_traffic_data())
+        records = data.setdefault("instances", {})
+        existing = records.get(key, {})
+        used = 0 if reset or existing.get("period") != traffic_period() else int(
+            existing.get("used_bytes", 0) or 0
+        )
+        records[key] = {
+            "period": traffic_period(),
+            "used_bytes": used,
+            "last_rx_bytes": max(0, int(rx_bytes or 0)),
+            "last_tx_bytes": max(0, int(tx_bytes or 0)),
+            "initialized": True,
+            "limit_bytes": int(limit or 0),
+            "action": action,
+            "exceeded": bool(limit and used >= limit),
+            "enforced_at": "",
+            "last_error": "",
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        _write_traffic_data(data)
+
+
+def remove_traffic_usage(node, name=None):
+    with TRAFFIC_LOCK:
+        data = _read_private_json(TRAFFIC_FILE, default_traffic_data())
+        records = data.setdefault("instances", {})
+        if name is None:
+            prefix = f"{node}/"
+            for key in [key for key in records if key.startswith(prefix)]:
+                records.pop(key, None)
+        else:
+            records.pop(_traffic_key(node, name), None)
+        _write_traffic_data(data)
+
+
+def traffic_quota_status(node, name, config=None):
+    config = config or {}
+    limit = int(config.get("user.incus-cn-panel.traffic-limit-bytes", 0) or 0)
+    action = config.get("user.incus-cn-panel.traffic-action", "stop")
+    record = read_traffic_data()["instances"].get(_traffic_key(node, name), {})
+    used = int(record.get("used_bytes", 0) or 0) if record.get("period") == traffic_period() else 0
+    return {
+        "period": traffic_period(),
+        "limit_bytes": limit,
+        "used_bytes": used,
+        "remaining_bytes": max(0, limit - used) if limit else 0,
+        "exceeded": bool(limit and used >= limit),
+        "action": action,
+        "enforced_at": record.get("enforced_at", ""),
+        "last_error": record.get("last_error", ""),
+    }
+
+
+def update_instance_traffic_quota(node, name, limit_value, action="stop", reset_usage=False):
+    node = require_node(node)
+    if not NAME_RE.fullmatch(name):
+        raise ValueError("实例名称无效")
+    if not isinstance(reset_usage, bool):
+        raise ValueError("流量归零参数无效")
+    limit, action = validate_traffic_quota(limit_value, action)
+    ref = f"{node}:{name}"
+    with INSTANCE_MUTATION_LOCK:
+        instance = json.loads(
+            run_incus("query", f"{node}:/1.0/instances/{name}?recursion=1", timeout=20)
+        )
+        config = instance.get("config") or {}
+        if limit:
+            run_incus("config", "set", ref, "user.incus-cn-panel.traffic-limit-bytes", str(limit))
+            run_incus("config", "set", ref, "user.incus-cn-panel.traffic-action", action)
+        else:
+            if config.get("user.incus-cn-panel.traffic-limit-bytes"):
+                run_incus("config", "unset", ref, "user.incus-cn-panel.traffic-limit-bytes")
+            if config.get("user.incus-cn-panel.traffic-action"):
+                run_incus("config", "unset", ref, "user.incus-cn-panel.traffic-action")
+            remove_traffic_usage(node, name)
+            return traffic_quota_status(node, name, {})
+        state = {}
+        if instance.get("status") == "Running":
+            state = json.loads(
+                run_incus("query", f"{node}:/1.0/instances/{name}/state", timeout=20)
+            )
+        parsed = parse_instances(node, [{**instance, "state": state}])[0]
+        initialize_traffic_usage(
+            node, name, limit, action,
+            parsed["network_rx_bytes"], parsed["network_tx_bytes"],
+            reset=reset_usage or not config.get("user.incus-cn-panel.traffic-limit-bytes"),
+        )
+    updated_config = {
+        "user.incus-cn-panel.traffic-limit-bytes": str(limit),
+        "user.incus-cn-panel.traffic-action": action,
+    }
+    return traffic_quota_status(node, name, updated_config)
+
+
+def update_traffic_usage(instances):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    period = traffic_period()
+    enforcement = []
+    with TRAFFIC_LOCK:
+        data = _read_private_json(TRAFFIC_FILE, default_traffic_data())
+        records = data.setdefault("instances", {})
+        for instance in instances:
+            limit = int(instance.get("traffic_limit_bytes", 0) or 0)
+            if not limit:
+                continue
+            action = instance.get("traffic_action", "stop")
+            key = _traffic_key(instance["node"], instance["name"])
+            record = records.get(key, {})
+            rx_bytes = int(instance.get("network_rx_bytes", 0) or 0)
+            tx_bytes = int(instance.get("network_tx_bytes", 0) or 0)
+            if record.get("period") != period:
+                used = 0
+                delta = 0
+                enforced_at = ""
+            elif record.get("initialized"):
+                delta = _counter_delta(rx_bytes, record.get("last_rx_bytes", 0))
+                delta += _counter_delta(tx_bytes, record.get("last_tx_bytes", 0))
+                used = int(record.get("used_bytes", 0) or 0) + delta
+                enforced_at = record.get("enforced_at", "")
+            else:
+                used = int(record.get("used_bytes", 0) or 0)
+                delta = 0
+                enforced_at = ""
+            exceeded = used >= limit
+            records[key] = {
+                **record,
+                "period": period,
+                "used_bytes": used,
+                "last_rx_bytes": rx_bytes,
+                "last_tx_bytes": tx_bytes,
+                "initialized": True,
+                "limit_bytes": limit,
+                "action": action,
+                "exceeded": exceeded,
+                "enforced_at": enforced_at if exceeded else "",
+                "last_error": record.get("last_error", "") if exceeded else "",
+                "updated_at": now,
+            }
+            if exceeded and action == "stop" and instance.get("status") == "Running":
+                enforcement.append((key, instance["node"], instance["name"], used, limit))
+        _write_traffic_data(data)
+    for key, node, name, used, limit in enforcement:
+        error = ""
+        try:
+            run_incus("stop", f"{node}:{name}", "--force", timeout=180)
+            record_operation(
+                "instance_traffic_stop", name, node,
+                message=f"本月双向流量 {format_bytes(used)} / {format_bytes(limit)}",
+            )
+        except Exception as exc:
+            error = str(exc)[:300]
+        with TRAFFIC_LOCK:
+            data = _read_private_json(TRAFFIC_FILE, default_traffic_data())
+            record = data.setdefault("instances", {}).get(key)
+            if record:
+                record["enforced_at"] = now if not error else ""
+                record["last_error"] = error
+                _write_traffic_data(data)
+    attach_traffic_usage(instances)
+    return instances
 
 
 def read_notification_config():
@@ -1263,6 +1520,15 @@ def detect_anomalies(nodes, instances, config, previous_snapshot=None):
                 key, "instance_no_ipv4", name, node, f"实例 {name} 没有 IPv4",
                 f"实例正在 {node} 运行，但未检测到全局 IPv4 地址",
             )
+        if rule_enabled(config, "instance_traffic_exceeded") and instance.get("traffic_exceeded"):
+            key = f"instance_traffic_exceeded:{instance_key}"
+            action = "已自动停止实例" if instance.get("traffic_action") == "stop" else "仅通知"
+            anomalies[key] = _anomaly(
+                key, "instance_traffic_exceeded", name, node,
+                f"实例 {name} 本月流量已超额",
+                f"双向合计 {format_bytes(instance.get('traffic_used_bytes', 0))} / "
+                f"{format_bytes(instance.get('traffic_limit_bytes', 0))}，处置：{action}",
+            )
     if previous_snapshot.get("initialized") and rule_enabled(config, "instance_missing"):
         previous_nodes = previous_snapshot.get("nodes", {})
         for instance_key in previous_snapshot.get("instances", {}):
@@ -1414,17 +1680,20 @@ def _persist_anomalies(config, anomalies, snapshot, scan_error=""):
     return notification_payload()
 
 
-def run_monitor_scan(force=False):
+def run_monitor_scan(force=False, traffic_only=False):
     with MONITOR_SCAN_LOCK:
         config = read_notification_config()
-        if not config["enabled"] and not force:
-            return notification_payload()
         data = read_notification_data()
         try:
             nodes, instances = overview()
+            update_traffic_usage(instances)
+            if traffic_only or (not config["enabled"] and not force):
+                return notification_payload()
             anomalies, snapshot = detect_anomalies(nodes, instances, config, data.get("snapshot"))
             return _persist_anomalies(config, anomalies, snapshot)
         except Exception as exc:
+            if traffic_only or (not config["enabled"] and not force):
+                raise
             anomalies = {
                 key: dict(value) for key, value in data.get("active", {}).items()
                 if value.get("type") != "monitor_failure"
@@ -1447,17 +1716,23 @@ def test_telegram_notification():
 
 
 def monitor_loop():
+    next_notification = 0.0
     while True:
         try:
             config = read_notification_config()
-            if config["enabled"]:
-                run_monitor_scan()
-            interval = config["interval_seconds"]
+            now = time.monotonic()
+            notification_due = config["enabled"] and now >= next_notification
+            run_monitor_scan(traffic_only=not notification_due)
+            if notification_due:
+                next_notification = now + config["interval_seconds"]
+            wait_seconds = min(60, max(1, next_notification - now)) if config["enabled"] else 60
         except Exception as exc:
             print(f"异常巡检失败: {exc}", flush=True)
-            interval = 60
-        MONITOR_WAKE_EVENT.wait(interval)
+            wait_seconds = 60
+        woke = MONITOR_WAKE_EVENT.wait(wait_seconds)
         MONITOR_WAKE_EVENT.clear()
+        if woke:
+            next_notification = 0.0
 
 
 def overview_for_session(session):
@@ -1718,6 +1993,9 @@ def create_instance(data):
     ssh_port = str(data.get("ssh_port", "")).strip()
     port_start = str(data.get("port_start", "")).strip()
     port_end = str(data.get("port_end", "")).strip()
+    traffic_limit, traffic_action = validate_traffic_quota(
+        data.get("traffic_limit_bytes", 0), data.get("traffic_action", "stop")
+    )
     if not NAME_RE.fullmatch(name):
         raise ValueError("名称只能包含字母、数字和连字符，最长 63 位")
     if kind not in {"container", "virtual-machine"}:
@@ -1769,6 +2047,11 @@ def create_instance(data):
             "-c", f"user.incus-cn-panel.image={image}",
         ])
         init_args.extend(["-c", f"user.incus-cn-panel.ssh-port={ssh_port}"])
+        if traffic_limit:
+            init_args.extend([
+                "-c", f"user.incus-cn-panel.traffic-limit-bytes={traffic_limit}",
+                "-c", f"user.incus-cn-panel.traffic-action={traffic_action}",
+            ])
         if port_range:
             init_args.extend([
                 "-c", f"user.incus-cn-panel.port-start={port_range[0]}",
@@ -1816,6 +2099,10 @@ def create_instance(data):
                     "port_count": port_range[1] - port_range[0] + 1,
                 })
             save_instance_credentials(node, name, access)
+            if traffic_limit:
+                initialize_traffic_usage(
+                    node, name, traffic_limit, traffic_action, reset=True
+                )
         except Exception:
             if created:
                 run_incus("delete", ref, "--force")
@@ -1884,6 +2171,19 @@ def create_batch_instances(data):
     if len(set(names)) != len(names) or any(not NAME_RE.fullmatch(name) for name in names):
         raise ValueError("批量实例名称无效，请调整前缀、编号或补零位数")
     batch_data = dict(data)
+    traffic_allocation = str(data.get("traffic_allocation", "per_instance"))
+    if traffic_allocation not in {"per_instance", "batch_total"}:
+        raise ValueError("批量流量分配方式无效")
+    if traffic_allocation == "batch_total":
+        total_limit, _ = validate_traffic_quota(
+            data.get("traffic_total_bytes", 0), data.get("traffic_action", "stop")
+        )
+        if total_limit:
+            per_instance_limit = total_limit // count
+            validate_traffic_quota(per_instance_limit, data.get("traffic_action", "stop"))
+            batch_data["traffic_limit_bytes"] = str(per_instance_limit)
+        else:
+            batch_data["traffic_limit_bytes"] = "0"
     batch_data["ssh_port"] = ""
     batch_data["name"] = names[0]
     with INSTANCE_MUTATION_LOCK:
@@ -1923,6 +2223,7 @@ def create_batch_instances(data):
                 try:
                     run_incus("delete", f"{node}:{item['name']}", "--force", timeout=180)
                     delete_credentials(node, item["name"])
+                    remove_traffic_usage(node, item["name"])
                 except Exception:
                     pass
             raise
@@ -1941,7 +2242,7 @@ class PanelServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "IncusCNPanel/0.9"
+    server_version = "IncusCNPanel/1.0"
 
     def setup(self):
         super().setup()
@@ -2382,6 +2683,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": str(exc)})
             return
 
+        traffic_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/traffic", path)
+        if traffic_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "只有管理员可以调整实例流量配额"})
+                return
+            node = traffic_match.group(1)
+            name = traffic_match.group(2)
+            try:
+                data = self.read_json()
+                traffic = update_instance_traffic_quota(
+                    node, name, data.get("traffic_limit_bytes", 0),
+                    data.get("traffic_action", "stop"), data.get("reset_usage", False),
+                )
+                record_operation(
+                    "instance_traffic_update", name, node,
+                    message=(
+                        f"月配额 {format_bytes(traffic['limit_bytes'])}"
+                        if traffic["limit_bytes"] else "取消月流量限制"
+                    ),
+                )
+                self.send_json(200, {"ok": True, "traffic": traffic})
+            except Exception as exc:
+                record_operation("instance_traffic_update", name, node, "failed", str(exc))
+                self.send_json(400, {"error": str(exc)})
+            return
+
         match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/action", path)
         if match:
             node = ""
@@ -2398,6 +2725,15 @@ class Handler(BaseHTTPRequestHandler):
                 action = str(self.read_json().get("action", ""))
                 if action not in {"start", "stop", "restart"}:
                     raise ValueError("不支持的操作")
+                if action in {"start", "restart"}:
+                    instance = json.loads(
+                        run_incus(
+                            "query", f"{node}:/1.0/instances/{name}?recursion=1", timeout=20
+                        )
+                    )
+                    traffic = traffic_quota_status(node, name, instance.get("config") or {})
+                    if traffic["exceeded"] and traffic["action"] == "stop":
+                        raise ValueError("该实例本月流量已超过配额，请调整配额或重置用量后再启动")
                 args = [action, f"{node}:{name}"]
                 if action in {"stop", "restart"}:
                     args.append("--force")
@@ -2448,6 +2784,7 @@ class Handler(BaseHTTPRequestHandler):
                     run_incus("remote", "remove", node, timeout=20)
                 delete_credentials(node)
                 remove_instance_assignments(node)
+                remove_traffic_usage(node)
                 record_operation("node_remove", node, node)
                 self.send_json(200, {"ok": True})
             except Exception as exc:
@@ -2464,6 +2801,7 @@ class Handler(BaseHTTPRequestHandler):
                 run_incus("delete", f"{node}:{name}", "--force", timeout=180)
                 delete_credentials(node, name)
                 remove_instance_assignments(node, name)
+                remove_traffic_usage(node, name)
                 record_operation("instance_delete", name, node)
                 self.send_json(200, {"ok": True})
             except Exception as exc:
