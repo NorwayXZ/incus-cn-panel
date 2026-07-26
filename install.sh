@@ -78,6 +78,7 @@ install -d -m 0755 "$APP_DIR/static"
 install -d -m 0700 "$CONFIG_DIR"
 install -d -m 0700 "$CONFIG_DIR/incus-client"
 install -d -m 0700 "$DATA_DIR"
+install -d -m 0700 "$DATA_DIR/cache"
 install -m 0755 "$SCRIPT_DIR/app.py" "$APP_DIR/app.py"
 install -m 0644 "$SCRIPT_DIR/static/index.html" "$APP_DIR/static/index.html"
 install -m 0644 "$SCRIPT_DIR/static/lucide.min.js" "$APP_DIR/static/lucide.min.js"
@@ -123,6 +124,7 @@ TLS_CERT=${CONFIG_DIR}/panel.crt
 TLS_KEY=${CONFIG_DIR}/panel.key
 INCUS_CONF=${CONFIG_DIR}/incus-client
 PANEL_DATA_DIR=${DATA_DIR}
+XDG_CACHE_HOME=${DATA_DIR}/cache
 EOF
   chmod 0600 "$CONFIG_DIR/config.env"
 
@@ -140,6 +142,9 @@ if ! grep -q '^INCUS_CONF=' "$CONFIG_DIR/config.env"; then
 fi
 if ! grep -q '^PANEL_DATA_DIR=' "$CONFIG_DIR/config.env"; then
   printf 'PANEL_DATA_DIR=%s\n' "$DATA_DIR" >> "$CONFIG_DIR/config.env"
+fi
+if ! grep -q '^XDG_CACHE_HOME=' "$CONFIG_DIR/config.env"; then
+  printf 'XDG_CACHE_HOME=%s/cache\n' "$DATA_DIR" >> "$CONFIG_DIR/config.env"
 fi
 INCUS_CONF="$CONFIG_DIR/incus-client" incus remote list >/dev/null
 

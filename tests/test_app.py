@@ -21,6 +21,22 @@ import app  # noqa: E402
 
 
 class ValidationTests(unittest.TestCase):
+    def test_run_incus_uses_writable_panel_cache(self):
+        old_data_dir = app.DATA_DIR
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                 mock.patch.dict(os.environ, {"XDG_CACHE_HOME": ""}), \
+                 mock.patch("app.subprocess.run") as run:
+                app.DATA_DIR = directory
+                run.return_value = mock.Mock(returncode=0, stdout="ok", stderr="")
+                self.assertEqual(app.run_incus("version"), "ok")
+                cache_dir = os.path.join(directory, "cache")
+                self.assertTrue(os.path.isdir(cache_dir))
+                self.assertEqual(os.stat(cache_dir).st_mode & 0o777, 0o700)
+                self.assertEqual(run.call_args.kwargs["env"]["XDG_CACHE_HOME"], cache_dir)
+        finally:
+            app.DATA_DIR = old_data_dir
+
     def test_instance_names(self):
         self.assertIsNotNone(app.NAME_RE.fullmatch("web-01"))
         self.assertIsNone(app.NAME_RE.fullmatch("-bad"))

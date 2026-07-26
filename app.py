@@ -179,12 +179,14 @@ ALERT_RULES = {
 
 
 def run_incus(*args, timeout=120):
+    cache_dir = os.environ.get("XDG_CACHE_HOME") or os.path.join(DATA_DIR, "cache")
+    os.makedirs(cache_dir, mode=0o700, exist_ok=True)
     result = subprocess.run(
         ["/usr/bin/incus", *args],
         capture_output=True,
         text=True,
         timeout=timeout,
-        env={**os.environ, "LC_ALL": "C.UTF-8"},
+        env={**os.environ, "LC_ALL": "C.UTF-8", "XDG_CACHE_HOME": cache_dir},
     )
     if result.returncode != 0:
         message = (result.stderr or result.stdout or "Incus 命令执行失败").strip()
