@@ -32,12 +32,13 @@ ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 SESSIONS = {}
 LOGIN_ATTEMPTS = {}
 REMOTE_CONFIG_LOCK = threading.Lock()
-INSTANCE_MUTATION_LOCK = threading.Lock()
+INSTANCE_MUTATION_LOCK = threading.RLock()
 OPERATION_LOCK = threading.Lock()
 CREDENTIALS_LOCK = threading.Lock()
 SESSION_TTL = 12 * 60 * 60
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
 SIZE_RE = re.compile(r"^[1-9][0-9]*(MiB|GiB)$")
+SIZE_VALUE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([KMGTPE]?i?B)$", re.IGNORECASE)
 RATE_RE = re.compile(r"^[1-9][0-9]*(kbit|Mbit|Gbit)$")
 SSH_PORT_MIN = 22000
 SSH_PORT_MAX = 59999
@@ -239,6 +240,54 @@ def format_bytes(value):
     return f"{value / 1024**2:.0f} MiB"
 
 
+def parse_size_bytes(value):
+    candidate = str(value or "").strip()
+    match = SIZE_VALUE_RE.fullmatch(candidate)
+    if not match:
+        return 0
+    number = float(match.group(1))
+    unit = match.group(2).upper()
+    decimal = not unit.endswith("IB")
+    prefix = unit[0] if len(unit) > 1 else ""
+    exponent = {"": 0, "K": 1, "M": 2, "G": 3, "T": 4, "P": 5, "E": 6}.get(prefix)
+    if exponent is None:
+        return 0
+    return int(number * ((1000 if decimal else 1024) ** exponent))
+
+
+def allocation_summary(instances, memory_total=0):
+    cpu = 0
+    memory = 0
+    disk = 0
+    unlimited = 0
+    ssh_ports = 0
+    for instance in instances:
+        cpu_value = str(instance.get("cpu", ""))
+        memory_value = str(instance.get("memory", ""))
+        disk_value = str(instance.get("disk", ""))
+        if cpu_value.isdigit():
+            cpu += int(cpu_value)
+        else:
+            unlimited += 1
+        if memory_value.endswith("%"):
+            try:
+                memory += int(memory_total * float(memory_value[:-1]) / 100)
+            except ValueError:
+                pass
+        else:
+            memory += parse_size_bytes(memory_value)
+        disk += parse_size_bytes(disk_value)
+        if str(instance.get("ssh_port", "")).isdigit():
+            ssh_ports += 1
+    return {
+        "cpu": cpu,
+        "memory": memory,
+        "disk": disk,
+        "unlimited_instances": unlimited,
+        "ssh_ports": ssh_ports,
+    }
+
+
 def parse_instances(node, raw):
     instances = []
     for item in raw:
@@ -281,11 +330,25 @@ def inspect_node(name, remote):
         instances = parse_instances(name, raw_instances)
         memory = resources.get("memory") or {}
         storage_disks = (resources.get("storage") or {}).get("disks") or []
-        disk_total = sum(
+        hardware_disk_total = sum(
             int(disk.get("size", 0))
             for disk in storage_disks
             if not disk.get("removable", False) and not disk.get("read_only", False)
         )
+        disk_total = hardware_disk_total
+        disk_used = 0
+        try:
+            pool_resources = json.loads(
+                run_incus("query", f"{name}:/1.0/storage-pools/default/resources", timeout=15)
+            )
+            space = pool_resources.get("space") or {}
+            disk_total = int(space.get("total", 0)) or hardware_disk_total
+            disk_used = int(space.get("used", 0))
+        except Exception:
+            pass
+        allocations = allocation_summary(instances, int(memory.get("total", 0)))
+        memory_reserved = max(int(memory.get("used", 0)), allocations["memory"])
+        disk_reserved = max(disk_used, allocations["disk"])
         load = resources.get("load") or {}
         return {
             "name": name,
@@ -295,6 +358,15 @@ def inspect_node(name, remote):
             "memory": int(memory.get("total", 0)),
             "memory_used": int(memory.get("used", 0)),
             "disk": disk_total,
+            "disk_used": disk_used,
+            "allocated_cpu": allocations["cpu"],
+            "allocated_memory": allocations["memory"],
+            "allocated_disk": allocations["disk"],
+            "available_cpu": int((resources.get("cpu") or {}).get("total", 0)),
+            "available_memory": max(0, int(memory.get("total", 0)) - memory_reserved),
+            "available_disk": max(0, disk_total - disk_reserved),
+            "available_ssh_ports": max(0, SSH_PORT_MAX - SSH_PORT_MIN + 1 - allocations["ssh_ports"]),
+            "unlimited_instances": allocations["unlimited_instances"],
             "load": float(load.get("Average1Min", 0)),
             "architecture": (resources.get("cpu") or {}).get("architecture", ""),
             "instance_count": len(instances),
@@ -310,6 +382,15 @@ def inspect_node(name, remote):
             "memory": 0,
             "memory_used": 0,
             "disk": 0,
+            "disk_used": 0,
+            "allocated_cpu": 0,
+            "allocated_memory": 0,
+            "allocated_disk": 0,
+            "available_cpu": 0,
+            "available_memory": 0,
+            "available_disk": 0,
+            "available_ssh_ports": 0,
+            "unlimited_instances": 0,
             "load": 0,
             "architecture": "",
             "instance_count": 0,
@@ -480,8 +561,8 @@ def create_instance(data):
     cpu_allowance = str(data.get("cpu_allowance", "100"))
     memory = str(data.get("memory", ""))
     disk = str(data.get("disk", ""))
-    ingress = str(data.get("ingress", "100Mbit"))
-    egress = str(data.get("egress", "100Mbit"))
+    ingress = str(data.get("ingress", "")).strip()
+    egress = str(data.get("egress", "")).strip()
     read_iops = str(data.get("read_iops", "0"))
     write_iops = str(data.get("write_iops", "0"))
     ssh_port = str(data.get("ssh_port", "")).strip()
@@ -497,7 +578,9 @@ def create_instance(data):
         raise ValueError("CPU 配额无效")
     if not SIZE_RE.fullmatch(memory) or not SIZE_RE.fullmatch(disk):
         raise ValueError("内存或磁盘格式无效")
-    if not RATE_RE.fullmatch(ingress) or not RATE_RE.fullmatch(egress):
+    if ingress and not RATE_RE.fullmatch(ingress):
+        raise ValueError("入站网络速率格式无效")
+    if egress and not RATE_RE.fullmatch(egress):
         raise ValueError("网络速率格式无效")
     if not read_iops.isdigit() or not write_iops.isdigit():
         raise ValueError("IOPS 必须是非负整数")
@@ -533,10 +616,13 @@ def create_instance(data):
             if int(write_iops):
                 root_limits.append(f"limits.write={write_iops}iops")
             run_incus("config", "device", "override", ref, "root", *root_limits)
-            run_incus(
-                "config", "device", "override", ref, "eth0",
-                f"limits.ingress={ingress}", f"limits.egress={egress}",
-            )
+            network_limits = []
+            if ingress:
+                network_limits.append(f"limits.ingress={ingress}")
+            if egress:
+                network_limits.append(f"limits.egress={egress}")
+            if network_limits:
+                run_incus("config", "device", "override", ref, "eth0", *network_limits)
             run_incus(
                 "config", "device", "add", ref, "ssh", "proxy",
                 f"listen=tcp:0.0.0.0:{ssh_port}", "connect=tcp:127.0.0.1:22",
@@ -558,6 +644,80 @@ def create_instance(data):
     return node, name, access
 
 
+def maximum_instances(node_info, data):
+    cpu = int(str(data.get("cpu", "0")) or 0)
+    memory = parse_size_bytes(data.get("memory", ""))
+    disk = parse_size_bytes(data.get("disk", ""))
+    if cpu < 1 or memory < 1 or disk < 1 or node_info.get("status") != "online":
+        return 0, {}
+    cpu_total = int(node_info.get("cpu", node_info.get("available_cpu", 0)))
+    limits = {
+        "cpu": "共享" if cpu <= cpu_total else 0,
+        "memory": int(node_info.get("available_memory", 0)) // memory,
+        "disk": int(node_info.get("available_disk", 0)) // disk,
+        "ssh_ports": int(node_info.get("available_ssh_ports", 0)),
+    }
+    if cpu > cpu_total:
+        return 0, limits
+    return max(0, min(limits[key] for key in ("memory", "disk", "ssh_ports"))), limits
+
+
+def live_node_info(node):
+    node = require_node(node)
+    remote = registered_remotes()[node]
+    info = inspect_node(node, remote)
+    if info["status"] != "online":
+        raise ValueError(f"宿主机当前离线: {info['error']}")
+    return info
+
+
+def create_batch_instances(data):
+    node = require_node(str(data.get("node", "")))
+    prefix = str(data.get("name_prefix", "")).lower()
+    try:
+        start = int(data.get("start_index", 1))
+        count = int(data.get("count", 0))
+        padding = int(data.get("padding", 3))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("批量编号参数无效") from exc
+    if not 0 <= start <= 999999 or not 1 <= count <= 10000 or not 1 <= padding <= 6:
+        raise ValueError("批量编号或数量无效")
+    names = [f"{prefix}{str(start + offset).zfill(padding)}" for offset in range(count)]
+    if len(set(names)) != len(names) or any(not NAME_RE.fullmatch(name) for name in names):
+        raise ValueError("批量实例名称无效，请调整前缀、编号或补零位数")
+    batch_data = dict(data)
+    batch_data["ssh_port"] = ""
+    batch_data["name"] = names[0]
+    with INSTANCE_MUTATION_LOCK:
+        node_info = live_node_info(node)
+        maximum, limits = maximum_instances(node_info, batch_data)
+        if count > maximum:
+            raise ValueError(
+                f"当前配置最多还能创建 {maximum} 台（内存 {limits.get('memory', 0)}、"
+                f"磁盘 {limits.get('disk', 0)}、端口 {limits.get('ssh_ports', 0)}；CPU 共享调度）"
+            )
+        existing = {item["name"] for item in node_info.get("instances", [])}
+        duplicate = next((name for name in names if name in existing), "")
+        if duplicate:
+            raise ValueError(f"实例名称已存在: {duplicate}")
+        created = []
+        try:
+            for name in names:
+                item_data = dict(batch_data)
+                item_data["name"] = name
+                _, _, access = create_instance(item_data)
+                created.append({"name": name, "access": access})
+        except Exception:
+            for item in reversed(created):
+                try:
+                    run_incus("delete", f"{node}:{item['name']}", "--force", timeout=180)
+                    delete_credentials(node, item["name"])
+                except Exception:
+                    pass
+            raise
+    return node, created
+
+
 
 
 with open(os.path.join(ASSET_DIR, "index.html"), encoding="utf-8") as html_file:
@@ -565,7 +725,7 @@ with open(os.path.join(ASSET_DIR, "index.html"), encoding="utf-8") as html_file:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "IncusCNPanel/0.4"
+    server_version = "IncusCNPanel/0.5"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}", flush=True)
@@ -747,6 +907,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(504, {"error": "镜像下载或实例创建超时"})
             except Exception as exc:
                 record_operation("instance_create", name or "未知实例", node, "failed", str(exc))
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path == "/api/instances/batch":
+            node = ""
+            prefix = ""
+            try:
+                data = self.read_json()
+                node = str(data.get("node", ""))
+                prefix = str(data.get("name_prefix", ""))
+                node, created = create_batch_instances(data)
+                record_operation(
+                    "instance_batch_create", prefix or "批量实例", node,
+                    message=f"成功创建 {len(created)} 台实例",
+                )
+                self.send_json(201, {"ok": True, "count": len(created), "instances": created})
+            except subprocess.TimeoutExpired:
+                record_operation(
+                    "instance_batch_create", prefix or "批量实例", node,
+                    "failed", "批量创建超时",
+                )
+                self.send_json(504, {"error": "批量创建超时，已尝试清理本批实例"})
+            except Exception as exc:
+                record_operation(
+                    "instance_batch_create", prefix or "批量实例", node,
+                    "failed", str(exc),
+                )
                 self.send_json(400, {"error": str(exc)})
             return
 

@@ -30,6 +30,32 @@ class ValidationTests(unittest.TestCase):
         self.assertIsNone(app.SIZE_RE.fullmatch("0GiB"))
         self.assertIsNone(app.SIZE_RE.fullmatch("2GB"))
 
+    def test_size_conversion_and_allocation_summary(self):
+        self.assertEqual(app.parse_size_bytes("512MiB"), 512 * 1024**2)
+        self.assertEqual(app.parse_size_bytes("2GB"), 2 * 1000**3)
+        self.assertEqual(app.parse_size_bytes("不限"), 0)
+        summary = app.allocation_summary([
+            {"cpu": "2", "memory": "512MiB", "disk": "5GiB", "ssh_port": "22000"},
+            {"cpu": "不限", "memory": "25%", "disk": "10GiB", "ssh_port": ""},
+        ], 4 * 1024**3)
+        self.assertEqual(summary["cpu"], 2)
+        self.assertEqual(summary["memory"], 1536 * 1024**2)
+        self.assertEqual(summary["disk"], 15 * 1024**3)
+        self.assertEqual(summary["unlimited_instances"], 1)
+        self.assertEqual(summary["ssh_ports"], 1)
+
+    def test_capacity_treats_cpu_as_shared_and_uses_hard_resources(self):
+        maximum, limits = app.maximum_instances({
+            "status": "online",
+            "cpu": 8,
+            "available_cpu": 8,
+            "available_memory": 3 * 1024**3,
+            "available_disk": 50 * 1024**3,
+            "available_ssh_ports": 100,
+        }, {"cpu": "2", "memory": "512MiB", "disk": "5GiB"})
+        self.assertEqual(limits, {"cpu": "共享", "memory": 6, "disk": 10, "ssh_ports": 100})
+        self.assertEqual(maximum, 6)
+
     def test_password_hash(self):
         self.assertTrue(app.password_matches("test-password"))
         self.assertFalse(app.password_matches("wrong-password"))
@@ -242,6 +268,98 @@ class ValidationTests(unittest.TestCase):
             ),
             run_incus.call_args_list,
         )
+
+    def test_create_instance_skips_unlimited_iops_and_network_limits(self):
+        with (
+            mock.patch("app.run_incus") as run_incus,
+            mock.patch("app.require_node", return_value="node-a"),
+            mock.patch("app.allocate_ssh_port", return_value="22000"),
+            mock.patch("app.generate_ssh_password", return_value="generated-password"),
+            mock.patch("app.provision_ssh"),
+            mock.patch("app.node_host", return_value="203.0.113.10"),
+            mock.patch("app.save_instance_credentials"),
+        ):
+            app.create_instance({
+                "node": "node-a", "name": "free-io", "type": "container",
+                "image": "images:alpine/edge", "cpu": "1", "cpu_allowance": "100",
+                "memory": "256MiB", "disk": "2GiB", "ingress": "", "egress": "",
+                "read_iops": "0", "write_iops": "0", "ssh_port": "",
+            })
+        calls = run_incus.call_args_list
+        self.assertIn(
+            mock.call("config", "device", "override", "node-a:free-io", "root", "size=2GiB"),
+            calls,
+        )
+        self.assertFalse(any(
+            call.args[:5] == ("config", "device", "override", "node-a:free-io", "eth0")
+            for call in calls
+        ))
+
+    def test_batch_creation_uses_padded_names_and_capacity_limit(self):
+        node_info = {
+            "status": "online", "cpu": 4, "available_cpu": 4,
+            "available_memory": 2 * 1024**3, "available_disk": 8 * 1024**3,
+            "available_ssh_ports": 100, "instances": [],
+        }
+
+        def create(data):
+            access = {"host": "203.0.113.10", "host_port": 22000, "guest_port": 22,
+                      "username": "root", "password": "password"}
+            return "node-a", data["name"], access
+
+        with (
+            mock.patch("app.require_node", return_value="node-a"),
+            mock.patch("app.live_node_info", return_value=node_info),
+            mock.patch("app.create_instance", side_effect=create) as create_mock,
+        ):
+            node, created = app.create_batch_instances({
+                "node": "node-a", "name_prefix": "vps-", "start_index": 7,
+                "padding": 3, "count": 2, "cpu": "1", "memory": "256MiB",
+                "disk": "2GiB",
+            })
+        self.assertEqual(node, "node-a")
+        self.assertEqual([item["name"] for item in created], ["vps-007", "vps-008"])
+        self.assertEqual(
+            [call.args[0]["name"] for call in create_mock.call_args_list],
+            ["vps-007", "vps-008"],
+        )
+
+        with (
+            mock.patch("app.require_node", return_value="node-a"),
+            mock.patch("app.live_node_info", return_value=node_info),
+        ):
+            with self.assertRaisesRegex(ValueError, "最多还能创建 4 台"):
+                app.create_batch_instances({
+                    "node": "node-a", "name_prefix": "vps-", "count": 5,
+                    "cpu": "1", "memory": "256MiB", "disk": "2GiB",
+                })
+
+    def test_batch_failure_rolls_back_completed_instances(self):
+        node_info = {
+            "status": "online", "cpu": 2, "available_cpu": 2,
+            "available_memory": 2 * 1024**3, "available_disk": 20 * 1024**3,
+            "available_ssh_ports": 100, "instances": [],
+        }
+        access = {"host": "203.0.113.10", "host_port": 22000, "guest_port": 22,
+                  "username": "root", "password": "password"}
+        with (
+            mock.patch("app.require_node", return_value="node-a"),
+            mock.patch("app.live_node_info", return_value=node_info),
+            mock.patch("app.create_instance", side_effect=[
+                ("node-a", "vps-001", access), RuntimeError("provision failed"),
+            ]),
+            mock.patch("app.run_incus") as run_incus,
+            mock.patch("app.delete_credentials") as delete_credentials,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "provision failed"):
+                app.create_batch_instances({
+                    "node": "node-a", "name_prefix": "vps-", "count": 2,
+                    "cpu": "1", "memory": "256MiB", "disk": "2GiB",
+                })
+        run_incus.assert_called_once_with(
+            "delete", "node-a:vps-001", "--force", timeout=180,
+        )
+        delete_credentials.assert_called_once_with("node-a", "vps-001")
 
     def test_existing_instance_can_be_given_ssh_access(self):
         instance = {
