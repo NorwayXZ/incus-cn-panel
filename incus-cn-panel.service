@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/incus-cn-panel/config.env
+EnvironmentFile=-/var/lib/incus-cn-panel/password.env
 ExecStart=/usr/bin/python3 /opt/incus-cn-panel/app.py
 Restart=on-failure
 RestartSec=3

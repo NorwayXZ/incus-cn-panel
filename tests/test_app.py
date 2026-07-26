@@ -22,13 +22,13 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.1.0")
-        self.assertLess(app.version_tuple("1.1.0"), app.version_tuple("1.2.0"))
+        self.assertEqual(app.APP_VERSION, "1.2.0")
+        self.assertLess(app.version_tuple("1.2.0"), app.version_tuple("1.3.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"1.2.0\n"
+        response.read.return_value = b"1.3.0\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "1.2.0")
+            self.assertEqual(app.fetch_latest_version(), "1.3.0")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -37,10 +37,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "1.2.0",
+            "status": "running", "target_version": "1.3.0",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "1.2.0")
+        self.assertEqual(payload["latest_version"], "1.3.0")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -56,7 +56,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("1.2.0")
+                    status = app.start_panel_update("1.3.0")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -64,7 +64,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "1.2.0")
+                self.assertEqual(saved["target_version"], "1.3.0")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -97,10 +97,10 @@ class ValidationTests(unittest.TestCase):
 
         try:
             version_payload = {
-                "current_version": "1.1.0", "latest_version": "1.2.0",
+                "current_version": "1.2.0", "latest_version": "1.3.0",
                 "update_available": True, "update": {"status": "idle"},
             }
-            queued = {"status": "queued", "target_version": "1.2.0"}
+            queued = {"status": "queued", "target_version": "1.3.0"}
             with mock.patch.object(app.Handler, "log_message", return_value=None), \
                  mock.patch("app.panel_version_payload", return_value=version_payload), \
                  mock.patch("app.fetch_latest_version", return_value="1.2.0"), \
@@ -153,6 +153,8 @@ class ValidationTests(unittest.TestCase):
         with open(os.path.join(root, "uninstall.sh"), encoding="utf-8") as source_file:
             uninstaller = source_file.read()
         for value in ("VERSION", "incus-cn-panel-bootstrap", "incus-cn-panel-update"):
+            self.assertIn(value, installer)
+        for value in ("password.env", "password_config_rewrite=false", "chmod 0600"):
             self.assertIn(value, installer)
         self.assertIn("incus-cn-panel-update", uninstaller)
 
@@ -232,6 +234,134 @@ class ValidationTests(unittest.TestCase):
             self.assertFalse(app.password_matches("wrong-password"))
         finally:
             app.PASSWORD_SALT, app.PASSWORD_HASH, app.PASSWORD_ITERATIONS = old_values
+
+    def test_admin_password_change_is_atomic_and_invalidates_admin_sessions(self):
+        old_values = (
+            app.PASSWORD_SALT, app.PASSWORD_HASH, app.PASSWORD_ITERATIONS,
+            app.PANEL_CONFIG_FILE,
+        )
+        app.SESSIONS.clear()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                config_file = os.path.join(directory, "config.env")
+                original = (
+                    "# panel settings\n"
+                    "PANEL_USER=admin\n"
+                    "PANEL_PASSWORD_SALT=old-salt\n"
+                    "PANEL_PASSWORD_HASH=old-hash\n"
+                    "PANEL_PASSWORD_ITERATIONS=0\n"
+                    "PANEL_HOST=0.0.0.0\n"
+                    "TLS_CERT=/etc/incus-cn-panel/panel.crt\n"
+                )
+                with open(config_file, "w", encoding="utf-8") as handle:
+                    handle.write(original)
+                os.chmod(config_file, 0o644)
+                app.PANEL_CONFIG_FILE = config_file
+                app.PASSWORD_SALT = "test-salt"
+                app.PASSWORD_HASH = hashlib.sha256(b"test-saltcurrent-password").hexdigest()
+                app.PASSWORD_ITERATIONS = 0
+                app.SESSIONS.update({
+                    "admin-one": {"username": "admin", "role": "admin"},
+                    "admin-two": {"username": "admin", "role": "admin"},
+                    "user-one": {"username": "customer", "role": "user"},
+                })
+
+                with self.assertRaisesRegex(ValueError, "当前密码错误"):
+                    app.change_admin_password("wrong-password", "new-strong-password")
+                with self.assertRaisesRegex(ValueError, "10 到 128"):
+                    app.change_admin_password("current-password", "short")
+                with open(config_file, encoding="utf-8") as handle:
+                    self.assertEqual(handle.read(), original)
+
+                app.change_admin_password("current-password", "new-strong-password")
+
+                with open(config_file, encoding="utf-8") as handle:
+                    updated = handle.read()
+                self.assertIn("# panel settings\n", updated)
+                self.assertIn("PANEL_USER=admin\n", updated)
+                self.assertIn("PANEL_HOST=0.0.0.0\n", updated)
+                self.assertIn("TLS_CERT=/etc/incus-cn-panel/panel.crt\n", updated)
+                self.assertEqual(updated.count("PANEL_PASSWORD_SALT="), 1)
+                self.assertEqual(updated.count("PANEL_PASSWORD_HASH="), 1)
+                self.assertIn("PANEL_PASSWORD_ITERATIONS=260000\n", updated)
+                self.assertEqual(os.stat(config_file).st_mode & 0o777, 0o600)
+                self.assertTrue(app.password_matches("new-strong-password"))
+                self.assertFalse(app.password_matches("current-password"))
+                self.assertNotIn("admin-one", app.SESSIONS)
+                self.assertNotIn("admin-two", app.SESSIONS)
+                self.assertIn("user-one", app.SESSIONS)
+        finally:
+            app.SESSIONS.clear()
+            (
+                app.PASSWORD_SALT, app.PASSWORD_HASH, app.PASSWORD_ITERATIONS,
+                app.PANEL_CONFIG_FILE,
+            ) = old_values
+
+    def test_admin_password_http_route_requires_admin_and_logs_out(self):
+        old_values = (
+            app.PASSWORD_SALT, app.PASSWORD_HASH, app.PASSWORD_ITERATIONS,
+            app.PANEL_CONFIG_FILE,
+        )
+        app.SESSIONS.clear()
+        server = None
+        thread = None
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                config_file = os.path.join(directory, "config.env")
+                with open(config_file, "w", encoding="utf-8") as handle:
+                    handle.write("PANEL_USER=admin\nPANEL_HOST=127.0.0.1\n")
+                app.PANEL_CONFIG_FILE = config_file
+                app.PASSWORD_SALT = "test-salt"
+                app.PASSWORD_HASH = hashlib.sha256(b"test-saltcurrent-password").hexdigest()
+                app.PASSWORD_ITERATIONS = 0
+                app.SESSIONS["admin-token"] = {
+                    "username": "admin", "role": "admin", "csrf": "csrf-token",
+                    "expires": 9999999999,
+                }
+
+                server = app.PanelServer(("127.0.0.1", 0), app.Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_address[1], timeout=5,
+                )
+                payload = json.dumps({
+                    "current_password": "current-password",
+                    "new_password": "new-strong-password",
+                    "confirm_password": "new-strong-password",
+                })
+                with mock.patch.object(app.Handler, "log_message", return_value=None), \
+                     mock.patch("app.record_operation") as record_operation:
+                    connection.request("POST", "/api/account/password", body=payload, headers={
+                        "Content-Type": "application/json",
+                        "Cookie": "incus_cn_session=admin-token",
+                        "X-CSRF-Token": "csrf-token",
+                    })
+                    response = connection.getresponse()
+                    data = json.loads(response.read())
+                    headers = dict(response.getheaders())
+                connection.close()
+
+                self.assertEqual(response.status, 200)
+                self.assertTrue(data["ok"])
+                self.assertIn("Max-Age=0", headers["Set-Cookie"])
+                self.assertTrue(app.password_matches("new-strong-password"))
+                self.assertFalse(app.password_matches("current-password"))
+                self.assertNotIn("admin-token", app.SESSIONS)
+                record_operation.assert_called_once_with(
+                    "admin_password_change", app.PANEL_USER, message="管理员密码已修改",
+                )
+        finally:
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if thread is not None:
+                thread.join(timeout=5)
+            app.SESSIONS.clear()
+            (
+                app.PASSWORD_SALT, app.PASSWORD_HASH, app.PASSWORD_ITERATIONS,
+                app.PANEL_CONFIG_FILE,
+            ) = old_values
 
     def test_user_accounts_are_private_authenticatable_and_disable_sessions(self):
         old_values = (app.DATA_DIR, app.USERS_FILE)
@@ -665,6 +795,7 @@ class ValidationTests(unittest.TestCase):
                     self.assertEqual(request("GET", "/api/system/version?refresh=1")[0], 403)
                     self.assertEqual(request("POST", "/api/instances", {})[0], 403)
                     self.assertEqual(request("POST", "/api/system/update", {})[0], 403)
+                    self.assertEqual(request("POST", "/api/account/password", {})[0], 403)
                     self.assertEqual(request("POST", "/api/notifications/scan", {})[0], 403)
                     self.assertEqual(request(
                         "POST", "/api/nodes/node-a/instances/web-01/traffic", {},
@@ -722,6 +853,9 @@ class ValidationTests(unittest.TestCase):
         self.assertIn('id="startUpdate"', app.HTML)
         self.assertIn("/api/system/version", app.HTML)
         self.assertIn("/api/system/update", app.HTML)
+        self.assertIn('id="openAdminAccount"', app.HTML)
+        self.assertIn('id="adminAccountDialog"', app.HTML)
+        self.assertIn("/api/account/password", app.HTML)
         self.assertIn("location.pathname", app.HTML)
         self.assertIn("apiBase+path", app.HTML)
         self.assertIn("const iconSvg=", app.HTML)
@@ -738,6 +872,17 @@ class ValidationTests(unittest.TestCase):
         with open(app.__file__, encoding="utf-8") as source_file:
             source = source_file.read()
         self.assertEqual(source.count("script-src 'self' 'unsafe-inline'"), 2)
+
+    def test_service_can_only_write_required_password_config(self):
+        service_file = os.path.join(os.path.dirname(app.__file__), "incus-cn-panel.service")
+        with open(service_file, encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertIn("EnvironmentFile=-/var/lib/incus-cn-panel/password.env", source)
+        self.assertIn(
+            "ReadWritePaths=/etc/incus-cn-panel/incus-client /var/lib/incus-cn-panel",
+            source,
+        )
+        self.assertNotIn("ReadWritePaths=/etc/incus-cn-panel/config.env", source)
 
     def test_tls_handshake_cannot_block_the_accept_loop(self):
         with open(app.__file__, encoding="utf-8") as source_file:

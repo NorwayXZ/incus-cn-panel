@@ -24,13 +24,16 @@ from zoneinfo import ZoneInfo
 
 HOST = os.environ.get("PANEL_HOST", "127.0.0.1")
 PORT = int(os.environ.get("PANEL_PORT", "8443"))
+DATA_DIR = os.environ.get("PANEL_DATA_DIR", "/var/lib/incus-cn-panel")
 PANEL_USER = os.environ.get("PANEL_USER", "admin")
 PASSWORD_SALT = os.environ.get("PANEL_PASSWORD_SALT", "")
 PASSWORD_HASH = os.environ.get("PANEL_PASSWORD_HASH", "")
 PASSWORD_ITERATIONS = int(os.environ.get("PANEL_PASSWORD_ITERATIONS", "0"))
+PANEL_CONFIG_FILE = os.environ.get(
+    "PANEL_PASSWORD_CONFIG_FILE", os.path.join(DATA_DIR, "password.env")
+)
 TLS_CERT = os.environ.get("TLS_CERT", "/etc/incus-cn-panel/panel.crt")
 TLS_KEY = os.environ.get("TLS_KEY", "/etc/incus-cn-panel/panel.key")
-DATA_DIR = os.environ.get("PANEL_DATA_DIR", "/var/lib/incus-cn-panel")
 OPERATIONS_FILE = os.path.join(DATA_DIR, "operations.jsonl")
 CREDENTIALS_FILE = os.path.join(DATA_DIR, "credentials.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
@@ -56,6 +59,7 @@ USERS_LOCK = threading.Lock()
 NOTIFICATION_LOCK = threading.RLock()
 TRAFFIC_LOCK = threading.RLock()
 UPDATE_LOCK = threading.RLock()
+PASSWORD_CONFIG_LOCK = threading.Lock()
 MONITOR_SCAN_LOCK = threading.Lock()
 MONITOR_WAKE_EVENT = threading.Event()
 SESSION_TTL = 12 * 60 * 60
@@ -226,6 +230,86 @@ def password_matches(password):
     else:
         candidate = hashlib.sha256(f"{PASSWORD_SALT}{password}".encode()).hexdigest()
     return hmac.compare_digest(candidate, PASSWORD_HASH)
+
+
+def _write_password_config(path, values):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError as exc:
+        raise RuntimeError(f"无法读取面板账户配置: {exc}") from exc
+
+    key_pattern = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+    seen = set()
+    updated = []
+    for line in lines:
+        match = key_pattern.match(line)
+        key = match.group(1) if match else ""
+        if key not in values:
+            updated.append(line)
+            continue
+        if key not in seen:
+            updated.append(f"{key}={values[key]}\n")
+            seen.add(key)
+
+    if updated and not updated[-1].endswith(("\n", "\r")):
+        updated[-1] += "\n"
+    for key, value in values.items():
+        if key not in seen:
+            updated.append(f"{key}={value}\n")
+
+    directory = os.path.dirname(path) or "."
+    descriptor, temporary = tempfile.mkstemp(prefix=".config.env.", dir=directory)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.writelines(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def change_admin_password(current_password, new_password):
+    global PASSWORD_SALT, PASSWORD_HASH, PASSWORD_ITERATIONS
+
+    current_password = str(current_password)
+    new_password = str(new_password)
+    if not 10 <= len(new_password) <= 128:
+        raise ValueError("新密码长度必须在 10 到 128 个字符之间")
+
+    with PASSWORD_CONFIG_LOCK:
+        if not password_matches(current_password):
+            raise ValueError("当前密码错误")
+        if hmac.compare_digest(current_password, new_password):
+            raise ValueError("新密码不能与当前密码相同")
+
+        salt = secrets.token_hex(16)
+        iterations = USER_PASSWORD_ITERATIONS
+        password_hash = hashlib.pbkdf2_hmac(
+            "sha256", new_password.encode(), bytes.fromhex(salt), iterations
+        ).hex()
+        _write_password_config(PANEL_CONFIG_FILE, {
+            "PANEL_PASSWORD_SALT": salt,
+            "PANEL_PASSWORD_HASH": password_hash,
+            "PANEL_PASSWORD_ITERATIONS": str(iterations),
+        })
+        PASSWORD_SALT = salt
+        PASSWORD_HASH = password_hash
+        PASSWORD_ITERATIONS = iterations
+
+        for token, session in list(SESSIONS.items()):
+            if session.get("role") == "admin":
+                SESSIONS.pop(token, None)
 
 
 def _read_users_unlocked():
@@ -2635,6 +2719,30 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/logout":
             SESSIONS.pop(auth[0], None)
             self.send_json(200, {"ok": True}, {"Set-Cookie": "incus_cn_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"})
+            return
+        if path == "/api/account/password":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                data = self.read_json()
+                new_password = str(data.get("new_password", ""))
+                if not hmac.compare_digest(
+                    new_password, str(data.get("confirm_password", ""))
+                ):
+                    raise ValueError("两次输入的新密码不一致")
+                change_admin_password(data.get("current_password", ""), new_password)
+                record_operation("admin_password_change", PANEL_USER, message="管理员密码已修改")
+                self.send_json(200, {
+                    "ok": True,
+                    "message": "密码修改成功，请使用新密码重新登录",
+                }, {
+                    "Set-Cookie": "incus_cn_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict",
+                })
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
             return
         if path == "/api/system/update":
             if auth[1].get("role") != "admin":

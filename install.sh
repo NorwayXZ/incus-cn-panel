@@ -88,9 +88,11 @@ install -m 0755 "$SCRIPT_DIR/bootstrap.sh" /usr/local/sbin/incus-cn-panel-bootst
 install -m 0755 "$SCRIPT_DIR/update.sh" /usr/local/sbin/incus-cn-panel-update
 install -m 0644 "$SCRIPT_DIR/incus-cn-panel.service" /etc/systemd/system/incus-cn-panel.service
 
+password_config_rewrite=false
 if [[ -f "$CONFIG_DIR/config.env" && -f /root/incus-cn-panel-credentials.txt && -z ${PANEL_PASSWORD:-} && -z $PANEL_PORT_WAS_SET && -z $PANEL_USER_WAS_SET ]]; then
   log "保留现有面板账号、密码、端口和证书"
 else
+  password_config_rewrite=true
   if [[ -z ${PANEL_PASSWORD:-} ]]; then
     PANEL_PASSWORD=$(openssl rand -hex 12)
   fi
@@ -138,6 +140,18 @@ EOF
 注意: 当前使用自签名证书，浏览器首次访问会显示证书提醒。
 EOF
   chmod 0600 /root/incus-cn-panel-credentials.txt
+fi
+
+password_config="$DATA_DIR/password.env"
+if [[ $password_config_rewrite == true || ! -f "$password_config" ]]; then
+  password_salt=$(sed -n 's/^PANEL_PASSWORD_SALT=//p' "$CONFIG_DIR/config.env" | tail -n 1)
+  password_hash=$(sed -n 's/^PANEL_PASSWORD_HASH=//p' "$CONFIG_DIR/config.env" | tail -n 1)
+  password_iterations=$(sed -n 's/^PANEL_PASSWORD_ITERATIONS=//p' "$CONFIG_DIR/config.env" | tail -n 1)
+  [[ $password_salt =~ ^[A-Za-z0-9]+$ && $password_hash =~ ^[a-fA-F0-9]{64}$ && $password_iterations =~ ^[0-9]+$ ]] \
+    || die "现有面板密码配置无效，无法创建独立密码配置。"
+  printf 'PANEL_PASSWORD_SALT=%s\nPANEL_PASSWORD_HASH=%s\nPANEL_PASSWORD_ITERATIONS=%s\n' \
+    "$password_salt" "$password_hash" "$password_iterations" > "$password_config"
+  chmod 0600 "$password_config"
 fi
 
 if ! grep -q '^INCUS_CONF=' "$CONFIG_DIR/config.env"; then

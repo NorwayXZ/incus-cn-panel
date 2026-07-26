@@ -42,6 +42,7 @@
 - 持久化记录节点接入和实例生命周期操作
 - 搜索实例并按运行状态过滤
 - 在侧边栏检查当前与 GitHub 最新版本，并由管理员一键更新控制面板
+- 管理员可从页面右上角修改自己的登录密码；修改后旧密码和全部管理员会话立即失效
 - 控制端与计算节点分别一键安装、一键卸载
 
 ## 设计原则
@@ -83,6 +84,8 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 
 安装完成后会显示访问地址和随机密码，凭据保存在 `/root/incus-cn-panel-credentials.txt`。面板默认使用自签名 HTTPS 证书；已有 Caddy 域名时可参考 [Caddy 反向代理](docs/caddy.md)。
 
+登录后可点击页面右上角“管理员账户”修改密码。系统会校验当前密码，并以 PBKDF2-SHA256 重新生成盐和哈希；成功后需要使用新密码重新登录。`/root/incus-cn-panel-credentials.txt` 只记录安装时的初始密码，之后不会保存新密码明文。
+
 ## 安装计算节点
 
 在每台计算节点执行。建议设置控制端公网 IP，这样脚本在 UFW 已启用时只向控制端放行 `8443`：
@@ -96,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 
 批量创建使用名称前缀、起始编号和补零位数生成实例名，例如 `vps-001` 至 `vps-010`。CPU 由 Incus 共享调度，单台配置不能超过宿主机物理核心数；批量上限由剩余内存、default 存储池空间和 SSH 端口数量的最小值决定。服务端会在开始批量任务前重新计算容量，任务中途失败时会尝试清理本批已经创建的实例。
 
-操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，实例 SSH 凭据保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`，这些文件权限均为 `0600`。再次运行控制端安装命令会原地升级并保留这些数据。
+操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，管理员密码哈希保存在 `/var/lib/incus-cn-panel/password.env`，实例 SSH 凭据保存在 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`，这些敏感文件权限均为 `0600`。再次运行控制端安装命令会原地升级并保留这些数据。
 
 月流量按实例所有非回环网卡的接收与发送字节合计计算。计数器每分钟持久化一次，实例或控制端重启后会继续累计；因此超额处置最多存在一个巡检周期的流量偏差。自动停止模式下，超额实例在提高配额、重置本月用量或进入下一个自然月前不能从面板重新启动。
 
