@@ -41,10 +41,6 @@
     .login-foot { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#98a2b3; font-size:11px; }
     .login-foot span { display:flex; align-items:center; gap:5px; }
     .login-foot svg { width:14px; height:14px; }
-    .login-visual { position:relative; grid-column:1; grid-row:1; min-width:0; overflow:hidden; background:#151a21 url('assets/login-datacenter.webp') center / cover no-repeat; }
-    .login-visual::after { content:""; position:absolute; inset:0; background:rgba(10,15,24,.24); }
-    .visual-credit { position:absolute; z-index:1; bottom:18px; left:22px; color:rgba(255,255,255,.72); font-size:10px; text-decoration:none; text-shadow:0 1px 3px rgba(0,0,0,.5); }
-    .visual-credit:hover { color:#fff; }
     .brand { display:flex; align-items:center; gap:11px; color:var(--nav); font-size:18px; font-weight:750; }
     .brand-mark { width:34px; height:34px; display:grid; place-items:center; color:#fff; background:var(--blue); border-radius:7px; }
     label { display:block; margin:0; color:#344054; font-weight:650; }
@@ -435,6 +431,71 @@
     .create-tabs { background:#e7dfd3; border-radius:999px; }
     .create-tab { border-radius:999px; font-family:var(--mono-font); font-size:11px; }
     .create-tab.active { color:var(--cream); background:var(--ink); box-shadow:none; }
+    #view-create { width:min(1320px,100%); }
+    .create-mode-bar { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:18px; }
+    .create-mode-bar .create-tabs { width:min(500px,100%); display:grid; grid-template-columns:1fr 1fr; gap:4px; margin:0; padding:4px; border-radius:6px; }
+    .create-mode-bar .create-tab { min-width:0; min-height:58px; display:grid; align-content:center; gap:2px; padding:8px 16px; border-radius:4px; text-align:left; }
+    .create-tab > span,.create-tab > small { display:block; }
+    .create-tab > span { font-family:var(--display-font); font-size:15px; font-weight:600; }
+    .create-tab > small { color:#857a8d; font:9px/1.35 var(--mono-font); }
+    .create-tab.active > small { color:#bfb3c9; }
+    .create-mode-note { min-width:0; display:flex; align-items:center; justify-content:flex-end; gap:8px; margin:0; color:var(--muted); font-size:12px; text-align:right; }
+    .create-mode-note svg { width:16px; height:16px; color:var(--gold); }
+    .create-layout { grid-template-columns:minmax(0,1fr) 360px; gap:20px; }
+    .create-layout .form-stack { gap:18px; }
+    .provision-section { padding:0; overflow:hidden; }
+    .form-section-head { min-height:76px; display:grid; grid-template-columns:38px minmax(0,1fr) auto; align-items:center; gap:13px; padding:14px 20px; border-bottom:1px solid var(--line); }
+    .section-index { width:34px; height:34px; display:grid; place-items:center; color:var(--ink); background:var(--amber-soft); border:1px solid #dfc47f; border-radius:50%; font:10px/1 var(--mono-font); }
+    .form-section-head h2 { margin:0; color:var(--ink); font-family:var(--display-font); font-size:18px; font-weight:600; }
+    .form-section-head p { margin:2px 0 0; color:var(--muted); font-size:12px; }
+    .section-badge { padding:4px 8px; color:#8e651c; background:#f7f0df; border:1px solid #e2d1aa; border-radius:999px; font:9px/1.2 var(--mono-font); }
+    .form-section-content { display:grid; gap:17px; padding:20px; }
+    .placement-grid { display:grid; grid-template-columns:1.15fr .85fr 1fr; gap:14px; }
+    .identity-block { display:grid; gap:13px; padding-top:17px; border-top:1px solid var(--line); }
+    .subsection-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; }
+    .subsection-head strong,.subsection-head span { display:block; }
+    .subsection-head strong { font-family:var(--display-font); font-size:15px; font-weight:600; }
+    .subsection-head span { margin-top:2px; color:var(--muted); font-size:11px; }
+    .field-state { min-height:18px; display:flex; align-items:center; gap:5px; color:var(--muted); font-size:11px; }
+    .field-state.invalid { color:var(--red); }
+    .field-state.valid { color:var(--green); }
+    .batch-name-preview { min-height:40px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 12px; color:#574c61; background:#f7f1e7; border:1px solid var(--line); border-radius:4px; }
+    .batch-name-preview span { color:var(--muted); font-size:11px; }
+    .batch-name-preview strong { min-width:0; font-family:var(--mono-font); font-size:11px; overflow-wrap:anywhere; text-align:right; }
+    .spec-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; }
+    .resource-impact { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; overflow:hidden; background:var(--line); border:1px solid var(--line); border-radius:4px; }
+    .impact-item { min-width:0; padding:11px 12px; background:#f7f1e7; }
+    .impact-item span,.impact-item strong { display:block; }
+    .impact-item span { color:var(--muted); font:9px/1.4 var(--mono-font); }
+    .impact-item strong { margin-top:3px; font-family:var(--mono-font); font-size:12px; overflow-wrap:anywhere; }
+    .impact-item.warning strong { color:var(--red); }
+    .advanced-options { overflow:hidden; border:1px solid var(--line); border-radius:4px; background:#fffdf7; }
+    .advanced-options > summary { min-height:46px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 13px; cursor:pointer; list-style:none; color:var(--ink); font-weight:650; }
+    .advanced-options > summary::-webkit-details-marker { display:none; }
+    .advanced-options > summary span { display:flex; align-items:center; gap:8px; }
+    .advanced-options > summary small { color:var(--muted); font-size:11px; font-weight:400; }
+    .advanced-options > summary svg { width:16px; height:16px; color:var(--gold); }
+    .advanced-options[open] > summary { border-bottom:1px solid var(--line); }
+    .advanced-options-body { padding:14px; }
+    .network-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    .configuration-block { display:grid; gap:13px; padding-top:17px; border-top:1px solid var(--line); }
+    .traffic-settings { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    .configuration-note { display:flex; align-items:flex-start; gap:8px; margin:0; padding:10px 12px; color:#675c6e; background:#f7f1e7; border-left:2px solid var(--gold); font-size:11px; }
+    .configuration-note svg { width:15px; height:15px; margin-top:1px; color:var(--gold); }
+    .summary.create-summary { top:88px; }
+    .create-summary .summary-head { padding:18px; }
+    .summary-check { display:grid; grid-template-columns:28px minmax(0,1fr); gap:9px; align-items:center; margin:14px 0 5px; padding:10px; color:var(--green); background:var(--green-soft); border:1px solid #a8d4c1; border-radius:4px; }
+    .summary-check.warning { color:var(--red); background:var(--red-soft); border-color:#e8b8ae; }
+    .summary-check.caution { color:var(--amber); background:var(--amber-soft); border-color:#dfc47f; }
+    .summary-check svg { width:18px; height:18px; }
+    .summary-check strong,.summary-check span { display:block; }
+    .summary-check strong { font-size:11px; }
+    .summary-check span { margin-top:1px; color:inherit; font-size:10px; opacity:.82; }
+    .summary-row strong { min-width:0; max-width:66%; text-align:right; overflow-wrap:anywhere; }
+    .summary-total { margin-top:12px; padding:11px 12px; background:#f7f1e7; border:1px solid var(--line); border-radius:4px; }
+    .summary-total > span { display:block; color:var(--muted); font:9px/1.4 var(--mono-font); }
+    .summary-total > strong { display:block; margin-top:4px; font-family:var(--mono-font); font-size:12px; overflow-wrap:anywhere; }
+    .summary .error { min-height:0; margin-top:10px; font-size:11px; }
     .image-tabs { border-bottom-color:var(--line); }
     .image-tab { font-family:var(--mono-font); font-size:11px; }
     .image-tab.active { color:var(--gold); border-bottom-color:var(--gold); }
@@ -465,21 +526,24 @@
     .modal-head,.modal-foot { border-color:var(--line); }
     .modal-head h2 { font-family:var(--display-font); font-size:20px; font-weight:600; }
     .close { color:var(--muted); border-radius:50%; }
-    .login-shell { background:var(--ink); }
-    .login-panel { background:var(--paper); border-left-color:rgba(201,146,47,.65); }
+    .login-shell { display:grid; grid-template-columns:1fr; place-items:center; background:#f3eee5; }
+    .login-panel { grid-column:1; width:min(480px,100%); min-height:100vh; min-height:100svh; padding:34px 44px 28px; background:transparent; border:0; }
+    .login-brand { justify-content:center; }
     .login-brand-copy strong { color:var(--ink); font-family:var(--display-font); font-size:18px; }
     .login-brand-copy span { color:var(--gold); font-family:var(--mono-font); font-size:9px; }
-    .login-form h1 { color:var(--ink); font-family:var(--display-font); font-size:34px; font-weight:600; }
-    .login-form > p { color:var(--muted); font-family:var(--mono-font); font-size:11px; }
+    .login-form { max-width:390px; align-self:center; margin:auto; padding:44px 0; }
+    .login-form h1 { color:var(--ink); font-family:var(--display-font); font-size:34px; font-weight:600; text-align:center; }
+    .login-form > p { color:var(--muted); font-family:var(--mono-font); font-size:11px; text-align:center; }
     .login-input input { background:#fffdf7; }
     .login-submit { color:var(--cream); background:var(--ink); border-color:var(--ink); }
     .login-submit:hover { color:var(--ink); background:var(--gold); border-color:var(--gold); }
-    .login-visual::after { background:rgba(30,19,51,.3); }
-    .visual-credit { color:rgba(250,243,231,.66); }
     .login-foot { color:#958b9b; font-family:var(--mono-font); font-size:9px; }
     @media (max-width:900px) {
       .login-shell { background:var(--paper); }
       .login-panel { background:var(--paper); }
+    }
+    @media (max-width:1100px) {
+      .create-layout { grid-template-columns:minmax(0,1fr); }
     }
     @media (max-width:760px) {
       .topbar { height:60px; padding:0 13px; }
@@ -494,6 +558,28 @@
       .page-head { padding-bottom:14px; }
       .page-head h1 { font-size:28px; }
       .metric { min-height:116px; }
+      .create-mode-bar { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; }
+      .create-mode-bar .create-tabs { width:100%; max-width:none; }
+      .create-mode-bar .create-tab { min-height:48px; padding:7px 10px; text-align:center; }
+      .create-tab > small { display:none; }
+      .create-mode-note { justify-content:flex-start; text-align:left; }
+      .form-section-head { grid-template-columns:34px minmax(0,1fr); min-height:70px; padding:13px 14px; }
+      .section-badge { display:none; }
+      .form-section-content { padding:15px 14px; }
+      .placement-grid,.spec-grid,.network-grid,.traffic-settings { grid-template-columns:1fr; }
+      .resource-impact { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .create-layout .capacity-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .create-layout .capacity-item:last-child { grid-column:1 / -1; }
+      .image-profile { align-items:stretch; flex-direction:column; }
+      .image-profile .row-actions { display:grid; grid-template-columns:1fr 1fr; width:100%; }
+      .image-profile .row-actions .btn { min-width:0; }
+      .subsection-head { display:block; }
+      .batch-name-preview { display:grid; }
+      .batch-name-preview strong { text-align:left; }
+      .advanced-options > summary { align-items:flex-start; }
+      .advanced-options > summary small { text-align:right; }
+      .summary-row strong { max-width:62%; }
+      .login-panel { padding:28px 24px 22px; }
     }
   </style>
 </head>
@@ -511,7 +597,6 @@
       </form>
       <div class="login-foot"><span><i data-lucide="shield-check"></i>TLS 安全连接</span><span>Incus Control</span></div>
     </div>
-    <div class="login-visual"><a class="visual-credit" href="https://noirlab.edu/public/images/6V6A0375-CC" target="_blank" rel="noopener">NOIRLab/NSF/AURA/T. Slovinský · CC BY 4.0</a></div>
   </section>
 
   <section id="app" class="hidden">
@@ -572,16 +657,60 @@
 
       <section id="view-create" class="view hidden">
         <div class="page-head"><div><span class="page-kicker">资源编排</span><h1>切割实例</h1><p>按宿主机剩余容量创建单台或批量系统实例</p></div></div>
-        <div class="create-tabs" role="tablist"><button type="button" class="create-tab active" data-create-mode="single">单个创建</button><button type="button" class="create-tab" data-create-mode="batch">批量创建</button></div>
-        <form id="createForm" class="form-layout">
-          <div class="form-stack">
-            <section class="form-section section-flow"><div class="section-title"><i data-lucide="server"></i><div><h2>宿主机与系统</h2><span>选择实例运行位置和基础镜像</span></div></div><div class="grid3"><div class="field"><label for="targetNode">宿主机</label><select id="targetNode" required></select></div><div class="field"><label for="type">虚拟化类型</label><select id="type"><option value="container">LXC 系统容器</option><option value="virtual-machine">KVM 虚拟机</option></select></div><div class="field"><label for="image">操作系统</label><select id="image" required></select></div></div><div id="imageProfile" class="image-profile"><div><strong id="imageProfileTitle">请选择镜像</strong><span id="imageProfileDetail">选择后显示最低与推荐配置</span></div><button type="button" class="btn small" id="applyRecommended"><i data-lucide="wand-sparkles"></i>应用推荐配置</button></div><div id="singleNameField" class="field"><label for="name">实例名称</label><input id="name" pattern="[A-Za-z0-9][A-Za-z0-9-]{0,62}" placeholder="例如 web-hk-01" required></div><div id="batchFields" class="grid4 hidden"><div class="field"><label for="batchPrefix">名称前缀</label><input id="batchPrefix" value="vps-" placeholder="例如 vps-"></div><div class="field"><label for="batchStart">起始编号</label><input id="batchStart" type="number" min="0" max="999999" value="1"></div><div class="field"><label for="batchPadding">编号位数</label><select id="batchPadding"><option value="2">2 位</option><option value="3" selected>3 位</option><option value="4">4 位</option><option value="5">5 位</option><option value="6">6 位</option></select></div><div class="field"><label for="batchCount">创建数量</label><input id="batchCount" type="number" min="1" value="1"></div></div><div class="capacity-strip"><div class="capacity-item"><span>可分配 CPU</span><strong id="capacityCpu">-</strong></div><div class="capacity-item"><span>可分配内存</span><strong id="capacityMemory">-</strong></div><div class="capacity-item"><span>可分配磁盘</span><strong id="capacityDisk">-</strong></div><div class="capacity-item"><span>可用 SSH 端口</span><strong id="capacityPorts">-</strong></div><div class="capacity-item"><span>业务端口容量</span><strong id="capacityBusinessPorts">未启用</strong></div></div><div id="batchCapacity" class="batch-capacity hidden"><span>按当前单机配置，最多还能创建</span><strong><span id="batchMaximum">0</span> 台</strong><button type="button" class="btn small" id="useBatchMaximum">使用最大数量</button></div></section>
-            <section class="form-section section-flow"><div class="section-title"><i data-lucide="gauge"></i><div><h2>计算与存储</h2><span>CPU 采用共享调度，内存和系统盘决定可创建数量</span></div></div><div class="grid3"><div class="field"><label for="cpu">CPU 核心</label><input id="cpu" type="number" min="1" max="128" value="1" required></div><div class="field"><label for="cpuAllowance">单机 CPU 上限</label><div class="input-unit"><input id="cpuAllowance" type="number" min="1" max="100" value="20" required><select disabled><option>%</option></select></div></div><div class="field"><label for="memoryValue">内存</label><div class="input-unit"><input id="memoryValue" type="number" min="64" value="256" required><select id="memoryUnit"><option value="MiB">MiB</option><option value="GiB">GiB</option></select></div></div><div class="field"><label for="diskValue">系统盘</label><div class="input-unit"><input id="diskValue" type="number" min="1" value="2" required><select id="diskUnit"><option value="GiB">GiB</option><option value="MiB">MiB</option></select></div></div><div class="field limit-field"><label for="readIopsMode">读取 IOPS</label><select id="readIopsMode"><option value="unlimited">宿主机最大（不限制）</option><option value="custom">自定义限制</option></select><div id="readIopsCustom" class="input-unit hidden"><input id="readIops" type="number" min="1" max="1000000" value="100"><select disabled><option>IOPS</option></select></div></div><div class="field limit-field"><label for="writeIopsMode">写入 IOPS</label><select id="writeIopsMode"><option value="unlimited">宿主机最大（不限制）</option><option value="custom">自定义限制</option></select><div id="writeIopsCustom" class="input-unit hidden"><input id="writeIops" type="number" min="1" max="1000000" value="100"><select disabled><option>IOPS</option></select></div></div></div></section>
-            <section class="form-section section-flow"><div class="section-title"><i data-lucide="network"></i><div><h2>网络、端口与 SSH</h2><span>业务端口在宿主机与实例内保持相同端口号的一一映射</span></div></div><div class="grid3"><div class="field limit-field"><label for="ingressMode">入站速率</label><select id="ingressMode"><option value="unlimited">宿主机最大（不限制）</option><option value="custom">自定义限制</option></select><div id="ingressCustom" class="input-unit hidden"><input id="ingress" type="number" min="1" value="100"><select disabled><option>Mbit</option></select></div></div><div class="field limit-field"><label for="egressMode">出站速率</label><select id="egressMode"><option value="unlimited">宿主机最大（不限制）</option><option value="custom">自定义限制</option></select><div id="egressCustom" class="input-unit hidden"><input id="egress" type="number" min="1" value="100"><select disabled><option>Mbit</option></select></div></div><div id="singleSshField" class="field"><label for="sshPort">宿主机 SSH 端口</label><input id="sshPort" type="number" min="1024" max="65535" placeholder="留空自动分配"></div></div><div id="singlePortFields" class="port-grid"><div class="field"><label for="singlePortMode">业务端口</label><select id="singlePortMode"><option value="off">不开通业务端口</option><option value="custom">指定连续端口段</option></select></div><div id="singlePortCustom" class="hidden"><div class="field"><label for="singlePortStart">起始端口</label><input id="singlePortStart" type="number" min="1024" max="65535" value="10000"></div><div class="field"><label for="singlePortEnd">结束端口</label><input id="singlePortEnd" type="number" min="1024" max="65535" value="10010"></div></div></div><div id="batchPortFields" class="port-grid batch-port-grid hidden"><div class="field"><label for="batchPortMode">批量业务端口</label><select id="batchPortMode"><option value="custom">从端口池自动切分</option><option value="off">不开通业务端口</option></select></div><div id="batchPortCustom"><div class="field"><label for="batchPortPoolStart">端口池起始</label><input id="batchPortPoolStart" type="number" min="1024" max="65535" value="10000"></div><div class="field"><label for="batchPortPoolEnd">端口池结束</label><input id="batchPortPoolEnd" type="number" min="1024" max="65535" value="19999"></div><div class="field"><label for="batchPortCount">每台端口数</label><input id="batchPortCount" type="number" min="1" max="1000" value="10"></div></div></div><div id="sshNote" class="field-note">SSH 单独映射到实例 22 端口；业务端口段会避开所有现有 SSH 与业务端口。</div></section>
-            <section class="form-section section-flow"><div class="section-title"><i data-lucide="chart-no-axes-column-increasing"></i><div><h2>月流量配额</h2><span>按每台实例网卡接收与发送流量合计统计</span></div></div><div class="grid4"><div class="field"><label for="trafficMode">流量限制</label><select id="trafficMode"><option value="unlimited">不限制</option><option value="custom">设置月配额</option></select></div><div id="trafficCustom" class="hidden"><div id="batchTrafficAllocationField" class="field hidden"><label for="trafficAllocation">批量分配方式</label><select id="trafficAllocation"><option value="per_instance">每台相同配额</option><option value="batch_total">本批总量平均分配</option></select></div><div class="field"><label id="trafficValueLabel" for="trafficValue">每台配额</label><div class="input-unit"><input id="trafficValue" type="number" min="1" max="1048576" value="500"><select id="trafficUnit"><option value="GiB">GiB</option><option value="TiB">TiB</option></select></div></div><div class="field"><label for="trafficAction">超额处理</label><select id="trafficAction"><option value="stop">自动停止实例</option><option value="notify">仅通知，不停机</option></select></div></div></div><div class="field-note">按 Asia/Shanghai 自然月结算，控制端每分钟累计一次；批量模式可以按每台设置，也可以填写本批总量后平均分配。</div></section>
-            <div id="createError" class="error"></div>
+        <div class="create-mode-bar">
+          <div class="create-tabs" role="tablist" aria-label="创建模式">
+            <button type="button" role="tab" aria-selected="true" class="create-tab active" data-create-mode="single"><span>单个创建</span><small>精确配置并创建一台实例</small></button>
+            <button type="button" role="tab" aria-selected="false" class="create-tab" data-create-mode="batch"><span>批量创建</span><small>按统一规格连续创建多台</small></button>
           </div>
-          <aside class="summary"><div class="summary-head"><strong id="summaryTitle">单个实例预览</strong><span id="summaryNodeStatus">请选择在线宿主机</span></div><div class="summary-body"><div class="summary-row"><span>实例</span><strong id="summaryName">未命名</strong></div><div id="summaryCountRow" class="summary-row hidden"><span>数量 / 最大</span><strong id="summaryCount">1 / 0 台</strong></div><div class="summary-row"><span>系统</span><strong id="summaryImage">Alpine Edge</strong></div><div class="summary-row"><span>CPU</span><strong id="summaryCpu">1 核 / 20%</strong></div><div class="summary-row"><span>内存</span><strong id="summaryMemory">256 MiB</strong></div><div class="summary-row"><span>磁盘</span><strong id="summaryDisk">2 GiB</strong></div><div class="summary-row"><span>IOPS</span><strong id="summaryIops">不限制</strong></div><div class="summary-row"><span>网络速率</span><strong id="summaryNetwork">不限制</strong></div><div class="summary-row"><span>月流量</span><strong id="summaryTraffic">不限制</strong></div><div class="summary-row"><span>业务端口</span><strong id="summaryBusinessPorts">未开通</strong></div><div class="summary-row"><span>SSH 入口</span><strong id="summarySsh">自动分配</strong></div><button id="createSubmit" class="btn primary" type="submit"><i data-lucide="play"></i>创建并启动</button></div></aside>
+          <p class="create-mode-note"><i data-lucide="shield-check"></i><span id="createModeNote">创建前会检查名称、容量、SSH 与业务端口冲突</span></p>
+        </div>
+        <form id="createForm" class="form-layout create-layout">
+          <div class="form-stack">
+            <section class="form-section provision-section">
+              <header class="form-section-head"><span class="section-index">01</span><div><h2>部署目标与系统</h2><p>先确定实例运行位置、虚拟化方式和系统镜像</p></div><span class="section-badge">必填</span></header>
+              <div class="form-section-content">
+                <div class="placement-grid">
+                  <div class="field"><label for="targetNode">宿主机</label><select id="targetNode" required></select></div>
+                  <div class="field"><label for="type">虚拟化类型</label><select id="type"><option value="container">LXC 系统容器</option><option value="virtual-machine">KVM 虚拟机</option></select></div>
+                  <div class="field"><label for="image">操作系统</label><select id="image" required></select></div>
+                </div>
+                <div id="imageProfile" class="image-profile"><div><strong id="imageProfileTitle">请选择镜像</strong><span id="imageProfileDetail">选择后显示最低与推荐配置</span></div><div class="row-actions"><button type="button" class="btn small" id="applyMinimum"><i data-lucide="arrow-down-to-line"></i>最低规格</button><button type="button" class="btn small" id="applyRecommended"><i data-lucide="wand-sparkles"></i>推荐规格</button></div></div>
+                <div class="identity-block">
+                  <div class="subsection-head"><div><strong>实例标识</strong><span id="identityDescription">填写唯一名称，创建后将作为 Incus 实例名称</span></div></div>
+                  <div id="singleNameField" class="field"><label for="name">实例名称</label><input id="name" pattern="[A-Za-z0-9][A-Za-z0-9-]{0,62}" placeholder="例如 web-hk-01" required><div id="singleNameState" class="field-state">允许字母、数字和连字符，最长 63 个字符</div></div>
+                  <div id="batchFields" class="grid4 hidden"><div class="field"><label for="batchPrefix">名称前缀</label><input id="batchPrefix" value="vps-" placeholder="例如 vps-"></div><div class="field"><label for="batchStart">起始编号</label><input id="batchStart" type="number" min="0" max="999999" value="1"></div><div class="field"><label for="batchPadding">编号位数</label><select id="batchPadding"><option value="2">2 位</option><option value="3" selected>3 位</option><option value="4">4 位</option><option value="5">5 位</option><option value="6">6 位</option></select></div><div class="field"><label for="batchCount">创建数量</label><input id="batchCount" type="number" min="1" value="1"></div></div>
+                  <div id="batchNamePreview" class="batch-name-preview hidden"><span>将创建的名称范围</span><strong id="batchNameRange">vps-001</strong></div>
+                </div>
+                <div class="capacity-strip"><div class="capacity-item"><span>可分配 CPU</span><strong id="capacityCpu">-</strong></div><div class="capacity-item"><span>可分配内存</span><strong id="capacityMemory">-</strong></div><div class="capacity-item"><span>可分配磁盘</span><strong id="capacityDisk">-</strong></div><div class="capacity-item"><span>可用 SSH 端口</span><strong id="capacityPorts">-</strong></div><div class="capacity-item"><span>业务端口容量</span><strong id="capacityBusinessPorts">未启用</strong></div></div>
+                <div id="batchCapacity" class="batch-capacity hidden"><span>按当前单机配置，宿主机最多还能创建</span><strong><span id="batchMaximum">0</span> 台</strong><button type="button" class="btn small" id="useBatchMaximum">填入最大数量</button></div>
+              </div>
+            </section>
+
+            <section class="form-section provision-section">
+              <header class="form-section-head"><span class="section-index">02</span><div><h2>计算与存储规格</h2><p>先配置常用资源，再按需展开高级磁盘性能限制</p></div><span class="section-badge">单机规格</span></header>
+              <div class="form-section-content">
+                <div class="spec-grid">
+                  <div class="field"><label for="cpu">CPU 核心</label><input id="cpu" type="number" min="1" max="128" value="1" required></div>
+                  <div class="field"><label for="cpuAllowance">CPU 使用上限</label><div class="input-unit"><input id="cpuAllowance" type="number" min="1" max="100" value="20" required><select disabled><option>%</option></select></div></div>
+                  <div class="field"><label for="memoryValue">内存</label><div class="input-unit"><input id="memoryValue" type="number" min="64" value="256" required><select id="memoryUnit"><option value="MiB">MiB</option><option value="GiB">GiB</option></select></div></div>
+                  <div class="field"><label for="diskValue">系统盘</label><div class="input-unit"><input id="diskValue" type="number" min="1" value="2" required><select id="diskUnit"><option value="GiB">GiB</option><option value="MiB">MiB</option></select></div></div>
+                </div>
+                <div class="resource-impact"><div class="impact-item"><span>本次内存占用</span><strong id="impactMemory">-</strong></div><div class="impact-item"><span>创建后剩余内存</span><strong id="remainingMemory">-</strong></div><div class="impact-item"><span>本次磁盘占用</span><strong id="impactDisk">-</strong></div><div class="impact-item"><span>创建后剩余磁盘</span><strong id="remainingDisk">-</strong></div></div>
+                <details class="advanced-options"><summary><span><i data-lucide="settings-2"></i>高级磁盘性能</span><small>默认继承宿主机最大性能</small></summary><div class="advanced-options-body grid2"><div class="field limit-field"><label for="readIopsMode">读取 IOPS</label><select id="readIopsMode"><option value="unlimited">宿主机最大（不限制）</option><option value="custom">自定义限制</option></select><div id="readIopsCustom" class="input-unit hidden"><input id="readIops" type="number" min="1" max="1000000" value="100"><select disabled><option>IOPS</option></select></div></div><div class="field limit-field"><label for="writeIopsMode">写入 IOPS</label><select id="writeIopsMode"><option value="unlimited">宿主机最大（不限制）</option><option value="custom">自定义限制</option></select><div id="writeIopsCustom" class="input-unit hidden"><input id="writeIops" type="number" min="1" max="1000000" value="100"><select disabled><option>IOPS</option></select></div></div></div></details>
+              </div>
+            </section>
+
+            <section class="form-section provision-section">
+              <header class="form-section-head"><span class="section-index">03</span><div><h2>网络、端口与流量</h2><p>统一配置带宽、SSH 入口、业务端口和月流量策略</p></div><span class="section-badge">访问策略</span></header>
+              <div class="form-section-content">
+                <div class="network-grid"><div class="field limit-field"><label for="ingressMode">入站速率</label><select id="ingressMode"><option value="unlimited">宿主机最大（不限制）</option><option value="custom">自定义限制</option></select><div id="ingressCustom" class="input-unit hidden"><input id="ingress" type="number" min="1" value="100"><select disabled><option>Mbit</option></select></div></div><div class="field limit-field"><label for="egressMode">出站速率</label><select id="egressMode"><option value="unlimited">宿主机最大（不限制）</option><option value="custom">自定义限制</option></select><div id="egressCustom" class="input-unit hidden"><input id="egress" type="number" min="1" value="100"><select disabled><option>Mbit</option></select></div></div><div id="singleSshField" class="field"><label for="sshPort">宿主机 SSH 端口</label><input id="sshPort" type="number" min="1024" max="65535" placeholder="留空自动分配"></div></div>
+                <div class="configuration-block"><div class="subsection-head"><div><strong>业务端口</strong><span>宿主机端口与实例内部端口保持同号映射</span></div></div><div id="singlePortFields" class="port-grid"><div class="field"><label for="singlePortMode">分配方式</label><select id="singlePortMode"><option value="off">不开通业务端口</option><option value="custom">指定连续端口段</option></select></div><div id="singlePortCustom" class="hidden"><div class="field"><label for="singlePortStart">起始端口</label><input id="singlePortStart" type="number" min="1024" max="65535" value="10000"></div><div class="field"><label for="singlePortEnd">结束端口</label><input id="singlePortEnd" type="number" min="1024" max="65535" value="10010"></div></div></div><div id="batchPortFields" class="port-grid batch-port-grid hidden"><div class="field"><label for="batchPortMode">分配方式</label><select id="batchPortMode"><option value="custom">从端口池自动切分</option><option value="off">不开通业务端口</option></select></div><div id="batchPortCustom"><div class="field"><label for="batchPortPoolStart">端口池起始</label><input id="batchPortPoolStart" type="number" min="1024" max="65535" value="10000"></div><div class="field"><label for="batchPortPoolEnd">端口池结束</label><input id="batchPortPoolEnd" type="number" min="1024" max="65535" value="19999"></div><div class="field"><label for="batchPortCount">每台端口数</label><input id="batchPortCount" type="number" min="1" max="1000" value="10"></div></div></div></div>
+                <div class="configuration-block"><div class="subsection-head"><div><strong>月流量配额</strong><span>按实例全部非回环网卡的上传与下载流量合计</span></div></div><div class="traffic-settings"><div class="field"><label for="trafficMode">流量限制</label><select id="trafficMode"><option value="unlimited">不限制</option><option value="custom">设置月配额</option></select></div><div id="trafficCustom" class="hidden"><div id="batchTrafficAllocationField" class="field hidden"><label for="trafficAllocation">批量分配方式</label><select id="trafficAllocation"><option value="per_instance">每台相同配额</option><option value="batch_total">本批总量平均分配</option></select></div><div class="field"><label id="trafficValueLabel" for="trafficValue">每台配额</label><div class="input-unit"><input id="trafficValue" type="number" min="1" max="1048576" value="500"><select id="trafficUnit"><option value="GiB">GiB</option><option value="TiB">TiB</option></select></div></div><div class="field"><label for="trafficAction">超额处理</label><select id="trafficAction"><option value="stop">自动停止实例</option><option value="notify">仅通知，不停机</option></select></div></div></div></div>
+                <p id="sshNote" class="configuration-note"><i data-lucide="info"></i><span>SSH 会单独映射到实例 22 端口；系统自动避开已经占用的 SSH 和业务端口。月流量按 Asia/Shanghai 自然月统计，每分钟更新一次。</span></p>
+              </div>
+            </section>
+          </div>
+          <aside class="summary create-summary"><div class="summary-head"><strong id="summaryTitle">单个实例创建清单</strong><span id="summaryNodeStatus">请选择在线宿主机</span></div><div class="summary-body"><div id="summaryCheck" class="summary-check warning"><i data-lucide="circle-alert"></i><div><strong id="summaryCheckTitle">配置尚未完成</strong><span id="summaryCheckText">请先选择宿主机并填写实例名称</span></div></div><div class="summary-row"><span>实例</span><strong id="summaryName">未命名</strong></div><div id="summaryCountRow" class="summary-row hidden"><span>数量 / 最大</span><strong id="summaryCount">1 / 0 台</strong></div><div class="summary-row"><span>系统</span><strong id="summaryImage">-</strong></div><div class="summary-row"><span>CPU</span><strong id="summaryCpu">1 核 / 20%</strong></div><div class="summary-row"><span>内存</span><strong id="summaryMemory">256 MiB</strong></div><div class="summary-row"><span>磁盘</span><strong id="summaryDisk">2 GiB</strong></div><div class="summary-row"><span>IOPS</span><strong id="summaryIops">不限制</strong></div><div class="summary-row"><span>网络速率</span><strong id="summaryNetwork">不限制</strong></div><div class="summary-row"><span>月流量</span><strong id="summaryTraffic">不限制</strong></div><div class="summary-row"><span>业务端口</span><strong id="summaryBusinessPorts">未开通</strong></div><div class="summary-row"><span>SSH 入口</span><strong id="summarySsh">自动分配</strong></div><div class="summary-total"><span>本次预计占用</span><strong id="summaryTotalResources">1 核 · 256 MiB · 2 GiB</strong></div><div id="createError" class="error"></div><button id="createSubmit" class="btn primary" type="submit"><i data-lucide="play"></i>创建并启动</button></div></aside>
         </form>
       </section>
 
@@ -718,11 +847,140 @@
     function syncLimitFields(){['readIops','writeIops','ingress','egress','singlePort','batchPort','traffic'].forEach(key=>{$(key+'Custom').classList.toggle('hidden',$(key+'Mode').value!=='custom');});const batch=createMode==='batch',batchTotal=batch&&$('trafficAllocation').value==='batch_total',enabled=$('trafficMode').value==='custom';$('batchTrafficAllocationField').classList.toggle('hidden',!batch);$('trafficValueLabel').textContent=batchTotal?'本批总配额':'每台配额';let quota='不限制';if(enabled){quota=`${$('trafficValue').value} ${$('trafficUnit').value} / 月`;if(batchTotal){const total=Number($('trafficValue').value)*($('trafficUnit').value==='TiB'?1099511627776:1073741824),count=Math.max(1,Number($('batchCount').value||1));quota+=` 本批 · 每台 ${bytes(Math.floor(total/count))}`;}quota+=` · ${$('trafficAction').value==='stop'?'超额停机':'仅通知'}`;}$('summaryTraffic').textContent=quota;}
     function occupiedClientPorts(node){const used=new Set();cluster.instances.filter(x=>x.node===node).forEach(x=>{if(Number(x.ssh_port))used.add(Number(x.ssh_port));const start=Number(x.port_start),end=Number(x.port_end);if(start&&end>=start)for(let port=start;port<=end;port++)used.add(port);});return used;}
     function clientPortBlocks(node,start,end,size){const blocks=[],used=occupiedClientPorts(node);let candidate=start;while(size>0&&candidate+size-1<=end){const blockEnd=candidate+size-1;let conflict=0;for(let port=candidate;port<=blockEnd;port++){if(used.has(port)){conflict=port;break;}}if(conflict)candidate=conflict+1;else{blocks.push([candidate,blockEnd]);candidate=blockEnd+1;}}return blocks;}
-    function calculateCapacity(){const node=cluster.nodes.find(x=>x.name===$('targetNode').value),previous=capacityMaximum;let portsValid=true;batchPortBlocks=[];if(!node){capacityMaximum=0;}else{const cpu=Math.max(1,Number($('cpu').value||1)),memory=formBytes($('memoryValue').value,$('memoryUnit').value),disk=formBytes($('diskValue').value,$('diskUnit').value),limits=[memory?Math.floor(node.available_memory/memory):0,disk?Math.floor(node.available_disk/disk):0,node.available_ssh_ports];if(createMode==='batch'&&$('batchPortMode').value==='custom'){const start=Number($('batchPortPoolStart').value),end=Number($('batchPortPoolEnd').value),size=Number($('batchPortCount').value);portsValid=start>=1024&&end<=65535&&end>=start&&size>=1&&size<=1000;batchPortBlocks=portsValid?clientPortBlocks(node.name,start,end,size):[];limits.push(batchPortBlocks.length);$('capacityBusinessPorts').textContent=portsValid?`${batchPortBlocks.length} 段 · 每台 ${size} 个`:'端口池无效';}else if(createMode==='single'&&$('singlePortMode').value==='custom'){const start=Number($('singlePortStart').value),end=Number($('singlePortEnd').value),used=occupiedClientPorts(node.name);portsValid=start>=1024&&end<=65535&&end>=start&&end-start+1<=1000;for(let port=start;portsValid&&port<=end;port++)if(used.has(port))portsValid=false;$('capacityBusinessPorts').textContent=portsValid?`${end-start+1} 个 · 可用`:'范围无效或冲突';}else $('capacityBusinessPorts').textContent='未启用';capacityMaximum=cpu<=node.cpu&&portsValid?Math.max(0,Math.min(...limits)):0;$('capacityCpu').textContent=`${node.cpu} 核共享 · 单机 ≤ ${node.cpu}`;$('capacityMemory').textContent=`${bytes(node.available_memory)} / ${bytes(node.memory)}`;$('capacityDisk').textContent=`${bytes(node.available_disk)} / ${bytes(node.disk)}`;$('capacityPorts').textContent=`${node.available_ssh_ports} 个`;}if(!node){['capacityCpu','capacityMemory','capacityDisk','capacityPorts'].forEach(id=>$(id).textContent='-');$('capacityBusinessPorts').textContent='-';}$('batchMaximum').textContent=capacityMaximum;$('batchCount').max=Math.max(1,capacityMaximum);const count=Number($('batchCount').value||0);if(createMode==='batch'&&(!count||count>capacityMaximum||count===previous))$('batchCount').value=capacityMaximum;$('createSubmit').disabled=!node||capacityMaximum<1||!portsValid||(createMode==='batch'&&Number($('batchCount').value)>capacityMaximum);}
-    function updateSummary(){syncLimitFields();calculateCapacity();const node=cluster.nodes.find(x=>x.name===$('targetNode').value),start=Number($('batchStart').value||0),count=Number($('batchCount').value||0),padding=Number($('batchPadding').value||3),prefix=$('batchPrefix').value,image=selectedImage(),profile=image?.profiles?.[$('type').value];const first=prefix+String(start).padStart(padding,'0'),last=prefix+String(Math.max(start,start+count-1)).padStart(padding,'0');$('summaryNodeStatus').textContent=node?`${node.name} · ${node.cpu} 核共享 / 可用 ${bytes(node.available_memory)}`:'当前没有在线宿主机';$('summaryName').textContent=createMode==='batch'?(count>1?`${first} 至 ${last}`:first):($('name').value||'未命名');$('summaryCount').textContent=`${count||0} / ${capacityMaximum} 台`;$('summaryImage').textContent=$('image').selectedOptions[0]?.text||'-';$('summaryCpu').textContent=`${$('cpu').value} 核 / ${$('cpuAllowance').value}%`;$('summaryMemory').textContent=`${$('memoryValue').value} ${$('memoryUnit').value}`;$('summaryDisk').textContent=`${$('diskValue').value} ${$('diskUnit').value}`;$('summaryIops').textContent=$('readIopsMode').value==='custom'||$('writeIopsMode').value==='custom'?`读 ${$('readIopsMode').value==='custom'?$('readIops').value:'不限'} / 写 ${$('writeIopsMode').value==='custom'?$('writeIops').value:'不限'}`:'不限制';$('summaryNetwork').textContent=$('ingressMode').value==='custom'||$('egressMode').value==='custom'?`入 ${$('ingressMode').value==='custom'?$('ingress').value+' Mbit':'不限'} / 出 ${$('egressMode').value==='custom'?$('egress').value+' Mbit':'不限'}`:'宿主机最大（不限制）';if(createMode==='batch'&&$('batchPortMode').value==='custom'){const blocks=batchPortBlocks.slice(0,Math.max(1,count)),firstBlock=blocks[0],lastBlock=blocks[blocks.length-1];$('summaryBusinessPorts').textContent=firstBlock?`${firstBlock[0]}-${lastBlock[1]} · 每台 ${$('batchPortCount').value} 个`:'端口池不足';}else if(createMode==='single'&&$('singlePortMode').value==='custom')$('summaryBusinessPorts').textContent=`${$('singlePortStart').value}-${$('singlePortEnd').value}`;else $('summaryBusinessPorts').textContent='未开通';$('summarySsh').textContent=createMode==='batch'?'每台自动分配 → :22':($('sshPort').value?`${node?nodeHost(node.name):'宿主机'}:${$('sshPort').value} → :22`:'自动分配 → :22');$('imageProfileTitle').textContent=image?`${image.label} · ${image.source==='local'?'宿主机本地':'公共目录'}`:'请选择镜像';$('imageProfileDetail').textContent=profile?`最低 ${profile.minimum_memory} 内存 / ${profile.minimum_disk} 磁盘；推荐 ${profile.recommended_memory} / ${profile.recommended_disk}`:'当前类型没有可用配置';$('applyRecommended').disabled=!profile;}
+    function calculateCapacity(){
+      const node=cluster.nodes.find(x=>x.name===$('targetNode').value),previous=capacityMaximum;
+      const cpu=Math.max(1,Number($('cpu').value||1));
+      const memory=formBytes($('memoryValue').value,$('memoryUnit').value);
+      const disk=formBytes($('diskValue').value,$('diskUnit').value);
+      let portsValid=true,sshValid=true,limiter='';
+      batchPortBlocks=[];
+      if(!node){
+        capacityMaximum=0;
+      }else{
+        const limits=[
+          {label:'内存',value:memory?Math.floor(node.available_memory/memory):0},
+          {label:'磁盘',value:disk?Math.floor(node.available_disk/disk):0},
+          {label:'SSH 端口',value:Number(node.available_ssh_ports||0)},
+        ];
+        const used=occupiedClientPorts(node.name);
+        if(createMode==='batch'&&$('batchPortMode').value==='custom'){
+          const start=Number($('batchPortPoolStart').value),end=Number($('batchPortPoolEnd').value),size=Number($('batchPortCount').value);
+          portsValid=start>=1024&&end<=65535&&end>=start&&size>=1&&size<=1000;
+          batchPortBlocks=portsValid?clientPortBlocks(node.name,start,end,size):[];
+          limits.push({label:'业务端口',value:batchPortBlocks.length});
+          $('capacityBusinessPorts').textContent=portsValid?`${batchPortBlocks.length} 段 · 每台 ${size} 个`:'端口池无效';
+        }else if(createMode==='single'&&$('singlePortMode').value==='custom'){
+          const start=Number($('singlePortStart').value),end=Number($('singlePortEnd').value),ssh=Number($('sshPort').value||0);
+          portsValid=start>=1024&&end<=65535&&end>=start&&end-start+1<=1000;
+          for(let port=start;portsValid&&port<=end;port++)if(used.has(port)||port===ssh)portsValid=false;
+          $('capacityBusinessPorts').textContent=portsValid?`${end-start+1} 个 · 可用`:'范围无效或冲突';
+        }else $('capacityBusinessPorts').textContent='未启用';
+        const ssh=Number($('sshPort').value||0);
+        sshValid=createMode==='batch'||!ssh||(ssh>=1024&&ssh<=65535&&!used.has(ssh));
+        const minimum=Math.min(...limits.map(item=>item.value));
+        limiter=limits.filter(item=>item.value===minimum).map(item=>item.label).join('、');
+        capacityMaximum=cpu<=Number(node.cpu)&&portsValid&&sshValid?Math.max(0,minimum):0;
+        $('capacityCpu').textContent=`${node.cpu} 核共享 · 单机 ≤ ${node.cpu}`;
+        $('capacityMemory').textContent=`${bytes(node.available_memory)} / ${bytes(node.memory)}`;
+        $('capacityDisk').textContent=`${bytes(node.available_disk)} / ${bytes(node.disk)}`;
+        $('capacityPorts').textContent=`${node.available_ssh_ports} 个`;
+      }
+      if(!node){
+        ['capacityCpu','capacityMemory','capacityDisk','capacityPorts'].forEach(id=>$(id).textContent='-');
+        $('capacityBusinessPorts').textContent='-';
+      }
+      $('batchMaximum').textContent=capacityMaximum;
+      $('batchCount').max=Math.max(1,capacityMaximum);
+      const count=Number($('batchCount').value||0);
+      if(createMode==='batch'&&capacityMaximum>0&&(count>capacityMaximum||count===previous))$('batchCount').value=capacityMaximum;
+      return{node,cpu,memory,disk,portsValid,sshValid,limiter};
+    }
+    function profileBytes(value){const match=String(value||'').match(/^(\d+)(MiB|GiB)$/);return match?formBytes(match[1],match[2]):0;}
+    function batchIdentity(start,count,padding,prefix){
+      const first=prefix+String(start).padStart(padding,'0');
+      const last=prefix+String(Math.max(start,start+Math.max(1,count)-1)).padStart(padding,'0');
+      const existing=cluster.instances.filter(x=>x.node===$('targetNode').value).map(x=>x.name);
+      const conflict=existing.find(name=>{if(!name.startsWith(prefix))return false;const suffix=name.slice(prefix.length);if(suffix.length!==padding||!/^\d+$/.test(suffix))return false;const value=Number(suffix);return value>=start&&value<start+count&&String(value).padStart(padding,'0')===suffix;});
+      return{first,last,conflict,valid:/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(first)&&/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(last)};
+    }
+    function updateCreateReadiness(context){
+      const {node,cpu,memory,disk,portsValid,sshValid,limiter,profile,count,identity}=context;
+      const errors=[];
+      if(!node)errors.push('请选择在线宿主机');
+      if(!$('image').value)errors.push('请选择操作系统镜像');
+      if(node&&cpu>Number(node.cpu))errors.push(`单机 CPU 不能超过宿主机的 ${node.cpu} 核`);
+      if(profile&&memory<profileBytes(profile.minimum_memory))errors.push(`该系统最低需要 ${profile.minimum_memory} 内存`);
+      if(profile&&disk<profileBytes(profile.minimum_disk))errors.push(`该系统最低需要 ${profile.minimum_disk} 系统盘`);
+      if(!portsValid)errors.push('业务端口范围无效、冲突或端口池不足');
+      if(!sshValid)errors.push('指定的 SSH 端口已占用或不在 1024-65535 范围内');
+      if(createMode==='single'){
+        const name=$('name').value.trim(),valid=/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(name),duplicate=cluster.instances.some(x=>x.node===node?.name&&x.name===name);
+        $('singleNameState').className=`field-state ${name&&valid&&!duplicate?'valid':name?'invalid':''}`;
+        $('singleNameState').textContent=!name?'允许字母、数字和连字符，最长 63 个字符':!valid?'名称格式不正确':duplicate?'该宿主机已经存在同名实例':'名称可用';
+        if(!name)errors.push('请填写实例名称');else if(!valid)errors.push('实例名称格式不正确');else if(duplicate)errors.push('宿主机已经存在同名实例');
+      }else{
+        if(!identity.valid)errors.push('批量名称前缀或最终名称不符合格式要求');
+        if(identity.conflict)errors.push(`名称 ${identity.conflict} 已经存在`);
+        if(count<1)errors.push('创建数量至少为 1 台');
+        if(count>capacityMaximum)errors.push(`当前配置最多只能创建 ${capacityMaximum} 台`);
+      }
+      if(node&&capacityMaximum<1&&!errors.some(x=>x.includes('端口')||x.includes('CPU')))errors.push(`${limiter||'宿主机资源'}不足，无法按当前规格创建`);
+      const memoryRatio=node&&node.available_memory?memory*count/node.available_memory:0;
+      const diskRatio=node&&node.available_disk?disk*count/node.available_disk:0;
+      const caution=!errors.length&&(memoryRatio>.8||diskRatio>.8);
+      const check=$('summaryCheck');
+      check.className=`summary-check${errors.length?' warning':caution?' caution':''}`;
+      check.firstElementChild.outerHTML=iconSvg(errors.length?'circle-alert':caution?'triangle-alert':'circle-check');
+      $('summaryCheckTitle').textContent=errors.length?'配置尚未通过检查':caution?'配置可创建，但资源余量较低':'配置检查通过';
+      $('summaryCheckText').textContent=errors.length?`${errors[0]}${errors.length>1?`，另有 ${errors.length-1} 项`:''}`:caution?'本次创建将使用超过 80% 的可分配内存或磁盘':'名称、规格、容量与端口均可用';
+      $('createSubmit').disabled=errors.length>0;
+      $('createModeNote').textContent=node?`当前容量瓶颈：${limiter||'无'} · 最多 ${capacityMaximum} 台`:'添加在线宿主机后才能创建实例';
+    }
+    function updateSummary(){
+      syncLimitFields();
+      const capacity=calculateCapacity();
+      const node=capacity.node,start=Number($('batchStart').value||0),count=createMode==='batch'?Number($('batchCount').value||0):1,padding=Number($('batchPadding').value||3),prefix=$('batchPrefix').value.trim(),image=selectedImage(),profile=image?.profiles?.[$('type').value],identity=batchIdentity(start,count,padding,prefix);
+      const totalMemory=capacity.memory*Math.max(0,count),totalDisk=capacity.disk*Math.max(0,count);
+      $('summaryNodeStatus').textContent=node?`${node.name} · ${node.cpu} 核共享 / 可用 ${bytes(node.available_memory)}`:'当前没有在线宿主机';
+      $('summaryName').textContent=createMode==='batch'?(count>1?`${identity.first} 至 ${identity.last}`:identity.first):($('name').value||'未命名');
+      $('summaryCount').textContent=`${count||0} / ${capacityMaximum} 台`;
+      $('batchNameRange').textContent=count>1?`${identity.first} 至 ${identity.last}`:identity.first;
+      $('summaryImage').textContent=$('image').selectedOptions[0]?.text||'-';
+      $('summaryCpu').textContent=`${$('cpu').value} 核 / ${$('cpuAllowance').value}%`;
+      $('summaryMemory').textContent=`${$('memoryValue').value} ${$('memoryUnit').value}`;
+      $('summaryDisk').textContent=`${$('diskValue').value} ${$('diskUnit').value}`;
+      $('summaryIops').textContent=$('readIopsMode').value==='custom'||$('writeIopsMode').value==='custom'?`读 ${$('readIopsMode').value==='custom'?$('readIops').value:'不限'} / 写 ${$('writeIopsMode').value==='custom'?$('writeIops').value:'不限'}`:'不限制';
+      $('summaryNetwork').textContent=$('ingressMode').value==='custom'||$('egressMode').value==='custom'?`入 ${$('ingressMode').value==='custom'?$('ingress').value+' Mbit':'不限'} / 出 ${$('egressMode').value==='custom'?$('egress').value+' Mbit':'不限'}`:'宿主机最大（不限制）';
+      if(createMode==='batch'&&$('batchPortMode').value==='custom'){
+        const blocks=batchPortBlocks.slice(0,Math.max(1,count)),firstBlock=blocks[0],lastBlock=blocks[blocks.length-1];
+        $('summaryBusinessPorts').textContent=firstBlock?`${firstBlock[0]}-${lastBlock[1]} · 每台 ${$('batchPortCount').value} 个`:'端口池不足';
+      }else if(createMode==='single'&&$('singlePortMode').value==='custom')$('summaryBusinessPorts').textContent=`${$('singlePortStart').value}-${$('singlePortEnd').value}`;
+      else $('summaryBusinessPorts').textContent='未开通';
+      $('summarySsh').textContent=createMode==='batch'?'每台自动分配 → :22':($('sshPort').value?`${node?nodeHost(node.name):'宿主机'}:${$('sshPort').value} → :22`:'自动分配 → :22');
+      $('imageProfileTitle').textContent=image?`${image.label} · ${image.source==='local'?'宿主机本地':'公共目录'}`:'请选择镜像';
+      $('imageProfileDetail').textContent=profile?`最低 ${profile.minimum_memory} / ${profile.minimum_disk}；推荐 ${profile.recommended_memory} / ${profile.recommended_disk}`:'当前类型没有可用配置';
+      $('applyMinimum').disabled=!profile;$('applyRecommended').disabled=!profile;
+      $('impactMemory').textContent=bytes(totalMemory);$('impactDisk').textContent=bytes(totalDisk);
+      $('remainingMemory').textContent=node?bytes(Math.max(0,node.available_memory-totalMemory)):'-';$('remainingDisk').textContent=node?bytes(Math.max(0,node.available_disk-totalDisk)):'-';
+      $('remainingMemory').parentElement.classList.toggle('warning',!!node&&totalMemory>node.available_memory);
+      $('remainingDisk').parentElement.classList.toggle('warning',!!node&&totalDisk>node.available_disk);
+      $('summaryTotalResources').textContent=`${count} 台 · CPU 配额 ${capacity.cpu*count} 核 · ${bytes(totalMemory)} 内存 · ${bytes(totalDisk)} 磁盘`;
+      updateCreateReadiness({...capacity,profile,count,identity});
+    }
     function renderImageOptions(){const previous=$('image').value,node=$('targetNode').value,kind=$('type').value,local=selectedNodeImages(node).filter(x=>x.kind===kind),publicItems=cluster.public_images;let html=`<optgroup label="公共镜像">${publicItems.map(x=>`<option value="${esc(x.id)}">${esc(x.label)}</option>`).join('')}</optgroup>`;if(local.length)html+=`<optgroup label="${esc(node)} 本地镜像">${local.map(x=>`<option value="${esc(x.id)}">${esc(x.label)} · ${esc(x.short_fingerprint)}</option>`).join('')}</optgroup>`;$('image').innerHTML=html;if([...$('image').options].some(x=>x.value===previous))$('image').value=previous;}
     function renderCreate(){const online=cluster.nodes.filter(x=>x.status==='online'),selected=$('targetNode').value;$('targetNode').innerHTML=online.map(x=>`<option value="${esc(x.name)}">${esc(x.name)} · 可用 ${bytes(x.available_memory)}</option>`).join('');if(selected&&online.some(x=>x.name===selected))$('targetNode').value=selected;renderImageOptions();updateSummary();}
-    function setCreateMode(mode){createMode=mode;document.querySelectorAll('[data-create-mode]').forEach(x=>x.classList.toggle('active',x.dataset.createMode===mode));$('singleNameField').classList.toggle('hidden',mode==='batch');$('batchFields').classList.toggle('hidden',mode!=='batch');$('batchCapacity').classList.toggle('hidden',mode!=='batch');$('singleSshField').classList.toggle('hidden',mode==='batch');$('singlePortFields').classList.toggle('hidden',mode==='batch');$('batchPortFields').classList.toggle('hidden',mode!=='batch');$('summaryCountRow').classList.toggle('hidden',mode!=='batch');$('name').required=mode==='single';$('batchPrefix').required=mode==='batch';$('batchCount').required=mode==='batch';$('summaryTitle').textContent=mode==='batch'?'批量实例预览':'单个实例预览';updateSummary();if(mode==='batch')$('batchCount').value=capacityMaximum;updateSummary();$('createSubmit').innerHTML=mode==='batch'?'<i data-lucide="layers-3"></i>批量创建并启动':'<i data-lucide="play"></i>创建并启动';icons();}
+    function setCreateMode(mode){
+      createMode=mode;
+      document.querySelectorAll('[data-create-mode]').forEach(x=>{const active=x.dataset.createMode===mode;x.classList.toggle('active',active);x.setAttribute('aria-selected',String(active));});
+      $('singleNameField').classList.toggle('hidden',mode==='batch');$('batchFields').classList.toggle('hidden',mode!=='batch');$('batchNamePreview').classList.toggle('hidden',mode!=='batch');$('batchCapacity').classList.toggle('hidden',mode!=='batch');$('singleSshField').classList.toggle('hidden',mode==='batch');$('singlePortFields').classList.toggle('hidden',mode==='batch');$('batchPortFields').classList.toggle('hidden',mode!=='batch');$('summaryCountRow').classList.toggle('hidden',mode!=='batch');
+      $('name').required=mode==='single';$('batchPrefix').required=mode==='batch';$('batchCount').required=mode==='batch';
+      $('identityDescription').textContent=mode==='batch'?'设置命名规则并确认连续名称范围，系统会预检重复名称':'填写唯一名称，创建后将作为 Incus 实例名称';
+      $('summaryTitle').textContent=mode==='batch'?'批量实例创建清单':'单个实例创建清单';
+      if(mode==='batch'&&!Number($('batchCount').value))$('batchCount').value=1;
+      updateSummary();
+      $('createSubmit').innerHTML=mode==='batch'?'<i data-lucide="layers-3"></i>确认批量创建':'<i data-lucide="play"></i>创建并启动';
+      icons();
+    }
     function renderAll(){renderInstances();if(isAdmin()){renderDashboard();renderNodes();renderCreate();renderImages();renderOperations();renderUsers();renderNotifications();renderInstanceNotificationThresholds();if(!versionInfo)versionInfo={current_version:cluster.panel_version||'0.0.0',latest_version:'',update_available:false,update:cluster.panel_update||{}};renderVersionInfo(versionInfo);}icons();}
     function stopNodeLivePolling(){clearTimeout(nodeLiveTimer);nodeLiveTimer=null;}
     function startNodeLivePolling(){stopNodeLivePolling();refreshNodeLive();}
@@ -771,11 +1029,12 @@
     $('nodeForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('nodeSubmit'),connection=nodeConnection();button.disabled=true;button.textContent='正在验证...';$('nodeError').textContent='';try{await api('/api/nodes',{method:'POST',body:JSON.stringify({name:$('nodeName').value,address:connection.address,token:connection.token})});$('nodeForm').reset();toast('宿主机添加成功');await load();showView('nodes');}catch(err){$('nodeError').textContent=err.message;}finally{button.disabled=false;button.innerHTML='<i data-lucide="shield-check"></i>验证并添加';icons();}});
     $('createForm').addEventListener('input',updateSummary);$('createForm').addEventListener('change',updateSummary);
     $('targetNode').addEventListener('change',()=>{renderImageOptions();updateSummary();});$('type').addEventListener('change',()=>{renderImageOptions();updateSummary();});$('imageNode').addEventListener('change',renderImages);
+    $('applyMinimum').onclick=()=>{const image=selectedImage(),profile=image?.profiles?.[$('type').value];if(!profile)return;setSize('memory',profile.minimum_memory);setSize('disk',profile.minimum_disk);updateSummary();};
     $('applyRecommended').onclick=()=>{const image=selectedImage(),profile=image?.profiles?.[$('type').value];if(!profile)return;setSize('memory',profile.recommended_memory);setSize('disk',profile.recommended_disk);updateSummary();};
     $('imageUploadForm').addEventListener('submit',e=>{e.preventDefault();const file=$('imageUploadFile').files[0],node=$('imageNode').value;if(!file||!node)return;const xhr=new XMLHttpRequest(),button=$('imageUploadSubmit');imageUploadRequest=xhr;button.disabled=true;$('imageUploadStatus').textContent='正在上传到控制端...';$('imageUploadProgress').classList.remove('hidden');xhr.open('POST',apiBase+`/api/nodes/${encodeURIComponent(node)}/images/upload`);xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.setRequestHeader('X-CSRF-Token',csrf);const alias=$('imageUploadAlias').value.trim();if(alias)xhr.setRequestHeader('X-Image-Alias',alias);xhr.upload.onprogress=event=>{if(event.lengthComputable){const value=Math.round(event.loaded/event.total*100);$('imageUploadProgress').firstElementChild.style.width=value+'%';$('imageUploadStatus').textContent=value<100?`正在上传 ${value}%`:'正在由宿主机导入镜像...';}};xhr.onload=async()=>{let data={};try{data=JSON.parse(xhr.responseText);}catch{}imageUploadRequest=null;button.disabled=false;if(xhr.status>=200&&xhr.status<300){$('imageUploadDialog').close();toast('本地镜像导入成功');await load();}else $('imageUploadStatus').textContent=data.error||'镜像导入失败';};xhr.onerror=()=>{imageUploadRequest=null;button.disabled=false;$('imageUploadStatus').textContent='网络连接中断';};xhr.onabort=()=>{imageUploadRequest=null;button.disabled=false;$('imageUploadStatus').textContent='上传已取消';};xhr.send(file);});
     $('useBatchMaximum').onclick=()=>{$('batchCount').value=capacityMaximum;updateSummary();};
     function instancePayload(){const trafficMultiplier=$('trafficUnit').value==='TiB'?1099511627776:1073741824,trafficBytes=$('trafficMode').value==='custom'?String(Number($('trafficValue').value)*trafficMultiplier):'0',trafficAllocation=createMode==='batch'?$('trafficAllocation').value:'per_instance';const payload={node:$('targetNode').value,type:$('type').value,image:$('image').value,cpu:$('cpu').value,cpu_allowance:$('cpuAllowance').value,memory:$('memoryValue').value+$('memoryUnit').value,disk:$('diskValue').value+$('diskUnit').value,ingress:$('ingressMode').value==='custom'?$('ingress').value+'Mbit':'',egress:$('egressMode').value==='custom'?$('egress').value+'Mbit':'',read_iops:$('readIopsMode').value==='custom'?$('readIops').value:'0',write_iops:$('writeIopsMode').value==='custom'?$('writeIops').value:'0',ssh_port:createMode==='single'?$('sshPort').value:'',traffic_limit_bytes:trafficBytes,traffic_total_bytes:trafficAllocation==='batch_total'?trafficBytes:'0',traffic_allocation:trafficAllocation,traffic_action:$('trafficAction').value};if(createMode==='single'&&$('singlePortMode').value==='custom'){payload.port_start=$('singlePortStart').value;payload.port_end=$('singlePortEnd').value;}if(createMode==='batch'&&$('batchPortMode').value==='custom'){payload.port_pool_start=$('batchPortPoolStart').value;payload.port_pool_end=$('batchPortPoolEnd').value;payload.port_count=$('batchPortCount').value;}else if(createMode==='batch')payload.port_count='0';return payload;}
-    $('createForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('createSubmit'),instanceName=$('name').value,payload=instancePayload();button.disabled=true;$('createError').textContent='';try{if(createMode==='batch'){Object.assign(payload,{name_prefix:$('batchPrefix').value,start_index:$('batchStart').value,padding:$('batchPadding').value,count:$('batchCount').value});button.textContent=`正在创建 ${payload.count} 台实例...`;const data=await api('/api/instances/batch',{method:'POST',body:JSON.stringify(payload)});toast(`已成功创建 ${data.count} 台实例`);$('createForm').reset();setCreateMode('single');await load();showView('instances');}else{payload.name=instanceName;button.textContent='正在创建并配置 SSH...';const data=await api('/api/instances',{method:'POST',body:JSON.stringify(payload)});toast('实例创建成功');$('createForm').reset();setCreateMode('single');await load();showView('instances');showAccess(data.access,instanceName);}}catch(err){$('createError').textContent=err.message;}finally{button.disabled=false;button.innerHTML=createMode==='batch'?'<i data-lucide="layers-3"></i>批量创建并启动':'<i data-lucide="play"></i>创建并启动';updateSummary();icons();}});
+    $('createForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('createSubmit'),instanceName=$('name').value,payload=instancePayload();if(createMode==='batch'){const count=Number($('batchCount').value),start=Number($('batchStart').value),padding=Number($('batchPadding').value),identity=batchIdentity(start,count,padding,$('batchPrefix').value.trim());if(!confirm(`确认在 ${$('targetNode').value} 创建 ${count} 台实例？\n名称：${identity.first}${count>1?' 至 '+identity.last:''}`))return;}button.disabled=true;$('createError').textContent='';try{if(createMode==='batch'){Object.assign(payload,{name_prefix:$('batchPrefix').value,start_index:$('batchStart').value,padding:$('batchPadding').value,count:$('batchCount').value});button.textContent=`正在创建 ${payload.count} 台实例...`;const data=await api('/api/instances/batch',{method:'POST',body:JSON.stringify(payload)});toast(`已成功创建 ${data.count} 台实例`);$('createForm').reset();setCreateMode('single');await load();showView('instances');}else{payload.name=instanceName;button.textContent='正在创建并配置 SSH...';const data=await api('/api/instances',{method:'POST',body:JSON.stringify(payload)});toast('实例创建成功');$('createForm').reset();setCreateMode('single');await load();showView('instances');showAccess(data.access,instanceName);}}catch(err){$('createError').textContent=err.message;}finally{button.disabled=false;button.innerHTML=createMode==='batch'?'<i data-lucide="layers-3"></i>确认批量创建':'<i data-lucide="play"></i>创建并启动';updateSummary();icons();}});
     $('instanceSearch').addEventListener('input',renderInstances);$('instanceStatus').addEventListener('change',renderInstances);setInterval(refreshNotifications,30000);icons();load();
   </script>
 </body>

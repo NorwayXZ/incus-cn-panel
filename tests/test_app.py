@@ -22,13 +22,13 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.5.0")
-        self.assertLess(app.version_tuple("1.5.0"), app.version_tuple("1.6.0"))
+        self.assertEqual(app.APP_VERSION, "1.6.0")
+        self.assertLess(app.version_tuple("1.6.0"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"1.6.0\n"
+        response.read.return_value = b"1.7.0\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "1.6.0")
+            self.assertEqual(app.fetch_latest_version(), "1.7.0")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -37,10 +37,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "1.6.0",
+            "status": "running", "target_version": "1.7.0",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "1.6.0")
+        self.assertEqual(payload["latest_version"], "1.7.0")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -56,7 +56,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("1.6.0")
+                    status = app.start_panel_update("1.7.0")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -64,7 +64,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "1.6.0")
+                self.assertEqual(saved["target_version"], "1.7.0")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -97,10 +97,10 @@ class ValidationTests(unittest.TestCase):
 
         try:
             version_payload = {
-                "current_version": "1.5.0", "latest_version": "1.6.0",
+                "current_version": "1.6.0", "latest_version": "1.7.0",
                 "update_available": True, "update": {"status": "idle"},
             }
-            queued = {"status": "queued", "target_version": "1.6.0"}
+            queued = {"status": "queued", "target_version": "1.7.0"}
             live_payload = {
                 "nodes": [{"name": "node-a", "sample_ready": True}],
                 "interval_seconds": 5,
@@ -108,7 +108,7 @@ class ValidationTests(unittest.TestCase):
             with mock.patch.object(app.Handler, "log_message", return_value=None), \
                  mock.patch("app.panel_version_payload", return_value=version_payload), \
                  mock.patch("app.node_live_payload", return_value=live_payload), \
-                 mock.patch("app.fetch_latest_version", return_value="1.6.0"), \
+                 mock.patch("app.fetch_latest_version", return_value="1.7.0"), \
                  mock.patch("app.start_panel_update", return_value=queued), \
                  mock.patch("app.record_operation") as record_operation:
                 status, data = request("GET", "/api/system/version?refresh=1")
@@ -875,12 +875,15 @@ class ValidationTests(unittest.TestCase):
         self.assertIn('id="toggleLoginPassword"', app.HTML)
         self.assertIn('id="loginSubmit"', app.HTML)
         self.assertIn('id="loginErrorText"', app.HTML)
-        self.assertIn("assets/login-datacenter.webp", app.HTML)
+        self.assertNotIn('<div class="login-visual"', app.HTML)
+        self.assertNotIn("assets/login-datacenter.webp", app.HTML)
         self.assertIn("function setLoginError", app.HTML)
         self.assertIn("正在登录", app.HTML)
         self.assertIn("切割实例", app.HTML)
         self.assertIn("添加宿主机", app.HTML)
         self.assertIn("月流量配额", app.HTML)
+        for element_id in ("summaryCheck", "batchNameRange", "remainingMemory", "remainingDisk"):
+            self.assertIn(f'id="{element_id}"', app.HTML)
         self.assertIn('id="trafficDialog"', app.HTML)
         self.assertIn('id="managedTrafficValue" type="number" min="1" max="1048576" step="any"', app.HTML)
         self.assertIn("String(Math.round(Number($('managedTrafficValue').value)*multiplier))", app.HTML)
