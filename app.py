@@ -5,8 +5,10 @@ import json
 import os
 import re
 import secrets
+import shutil
 import ssl
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
@@ -40,13 +42,44 @@ NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
 SIZE_RE = re.compile(r"^[1-9][0-9]*(MiB|GiB)$")
 SIZE_VALUE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([KMGTPE]?i?B)$", re.IGNORECASE)
 RATE_RE = re.compile(r"^[1-9][0-9]*(kbit|Mbit|Gbit)$")
+IMAGE_ALIAS_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,127}$")
+FINGERPRINT_RE = re.compile(r"^[a-fA-F0-9]{12,64}$")
 SSH_PORT_MIN = 22000
 SSH_PORT_MAX = 59999
-ALLOWED_IMAGES = {
-    "images:ubuntu/24.04",
-    "images:debian/12",
-    "images:alpine/edge",
+MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", str(8 * 1024**3)))
+RESOURCE_PROFILES = {
+    "alpine": {
+        "container": {"minimum_memory": "128MiB", "minimum_disk": "1GiB", "recommended_memory": "256MiB", "recommended_disk": "2GiB"},
+        "virtual-machine": {"minimum_memory": "512MiB", "minimum_disk": "2GiB", "recommended_memory": "1GiB", "recommended_disk": "4GiB"},
+    },
+    "debian": {
+        "container": {"minimum_memory": "256MiB", "minimum_disk": "3GiB", "recommended_memory": "512MiB", "recommended_disk": "5GiB"},
+        "virtual-machine": {"minimum_memory": "1GiB", "minimum_disk": "5GiB", "recommended_memory": "2GiB", "recommended_disk": "10GiB"},
+    },
+    "ubuntu": {
+        "container": {"minimum_memory": "512MiB", "minimum_disk": "4GiB", "recommended_memory": "1GiB", "recommended_disk": "8GiB"},
+        "virtual-machine": {"minimum_memory": "1GiB", "minimum_disk": "6GiB", "recommended_memory": "2GiB", "recommended_disk": "12GiB"},
+    },
+    "rhel": {
+        "container": {"minimum_memory": "512MiB", "minimum_disk": "5GiB", "recommended_memory": "1GiB", "recommended_disk": "8GiB"},
+        "virtual-machine": {"minimum_memory": "2GiB", "minimum_disk": "10GiB", "recommended_memory": "4GiB", "recommended_disk": "20GiB"},
+    },
+    "generic": {
+        "container": {"minimum_memory": "128MiB", "minimum_disk": "1GiB", "recommended_memory": "512MiB", "recommended_disk": "4GiB"},
+        "virtual-machine": {"minimum_memory": "512MiB", "minimum_disk": "2GiB", "recommended_memory": "2GiB", "recommended_disk": "10GiB"},
+    },
 }
+PUBLIC_IMAGES = (
+    {"id": "images:alpine/3.22", "label": "Alpine 3.22", "family": "alpine", "release": "3.22", "channel": "稳定版"},
+    {"id": "images:alpine/edge", "label": "Alpine Edge", "family": "alpine", "release": "edge", "channel": "滚动版"},
+    {"id": "images:debian/12", "label": "Debian 12", "family": "debian", "release": "12", "channel": "稳定版"},
+    {"id": "images:debian/13", "label": "Debian 13", "family": "debian", "release": "13", "channel": "稳定版"},
+    {"id": "images:ubuntu/22.04", "label": "Ubuntu 22.04 LTS", "family": "ubuntu", "release": "22.04", "channel": "LTS"},
+    {"id": "images:ubuntu/24.04", "label": "Ubuntu 24.04 LTS", "family": "ubuntu", "release": "24.04", "channel": "LTS"},
+    {"id": "images:almalinux/9", "label": "AlmaLinux 9", "family": "rhel", "release": "9", "channel": "稳定版"},
+    {"id": "images:rockylinux/9", "label": "Rocky Linux 9", "family": "rhel", "release": "9", "channel": "稳定版"},
+)
+PUBLIC_IMAGE_MAP = {image["id"]: image for image in PUBLIC_IMAGES}
 
 
 def run_incus(*args, timeout=120):
@@ -322,6 +355,144 @@ def parse_instances(node, raw):
     return instances
 
 
+def image_family(value):
+    candidate = str(value or "").lower()
+    if "alpine" in candidate:
+        return "alpine"
+    if "debian" in candidate:
+        return "debian"
+    if "ubuntu" in candidate:
+        return "ubuntu"
+    if any(name in candidate for name in ("almalinux", "rockylinux", "centos", "rhel")):
+        return "rhel"
+    return "generic"
+
+
+def resource_profile(family, kind):
+    if kind not in {"container", "virtual-machine"}:
+        raise ValueError("实例类型无效")
+    return dict(RESOURCE_PROFILES.get(family, RESOURCE_PROFILES["generic"])[kind])
+
+
+def public_image_catalog():
+    catalog = []
+    for image in PUBLIC_IMAGES:
+        item = dict(image)
+        item["source"] = "public"
+        item["profiles"] = {
+            kind: resource_profile(item["family"], kind)
+            for kind in ("container", "virtual-machine")
+        }
+        catalog.append(item)
+    return catalog
+
+
+def parse_node_images(node, raw):
+    images = []
+    for item in raw:
+        fingerprint = str(item.get("fingerprint", ""))
+        if not FINGERPRINT_RE.fullmatch(fingerprint):
+            continue
+        properties = item.get("properties") or {}
+        aliases = sorted({
+            str(alias.get("name", ""))
+            for alias in item.get("aliases") or []
+            if IMAGE_ALIAS_RE.fullmatch(str(alias.get("name", "")))
+        })
+        family = image_family(" ".join([
+            properties.get("os", ""), properties.get("distribution", ""),
+            properties.get("description", ""), *aliases,
+        ]))
+        kind = "virtual-machine" if item.get("type") == "virtual-machine" else "container"
+        images.append({
+            "id": f"local:{fingerprint}",
+            "node": node,
+            "fingerprint": fingerprint,
+            "short_fingerprint": fingerprint[:12],
+            "aliases": aliases,
+            "label": aliases[0] if aliases else properties.get("description") or fingerprint[:12],
+            "description": properties.get("description", ""),
+            "family": family,
+            "release": properties.get("release", ""),
+            "architecture": item.get("architecture", ""),
+            "kind": kind,
+            "size": int(item.get("size", 0) or 0),
+            "uploaded_at": item.get("uploaded_at", ""),
+            "last_used_at": item.get("last_used_at", ""),
+            "source": "local",
+            "profiles": {kind: resource_profile(family, kind)},
+        })
+    return sorted(images, key=lambda item: (item["label"].lower(), item["fingerprint"]))
+
+
+def list_node_images(node):
+    node = require_node(node)
+    raw = json.loads(run_incus("image", "list", f"{node}:", "--format=json", timeout=30))
+    return parse_node_images(node, raw)
+
+
+def resolve_image(node, image_id, kind):
+    if image_id in PUBLIC_IMAGE_MAP:
+        item = dict(PUBLIC_IMAGE_MAP[image_id])
+        item.update({"source": "public", "reference": image_id})
+    else:
+        match = re.fullmatch(r"local:([a-fA-F0-9]{12,64})", image_id)
+        if not match:
+            raise ValueError("系统镜像无效")
+        fingerprint = match.group(1).lower()
+        matches = [
+            image for image in list_node_images(node)
+            if image["fingerprint"].lower().startswith(fingerprint)
+        ]
+        if len(matches) != 1:
+            raise ValueError("本地镜像不存在或指纹不唯一")
+        item = dict(matches[0])
+        if item["kind"] != kind:
+            expected = "KVM 虚拟机" if item["kind"] == "virtual-machine" else "LXC 容器"
+            raise ValueError(f"该本地镜像仅支持 {expected}")
+        item["reference"] = f"{node}:{item['fingerprint']}"
+    item["profile"] = resource_profile(item.get("family", "generic"), kind)
+    return item
+
+
+def validate_minimum_resources(memory, disk, profile):
+    if parse_size_bytes(memory) < parse_size_bytes(profile["minimum_memory"]):
+        raise ValueError(f"该系统最低需要 {profile['minimum_memory']} 内存")
+    if parse_size_bytes(disk) < parse_size_bytes(profile["minimum_disk"]):
+        raise ValueError(f"该系统最低需要 {profile['minimum_disk']} 系统盘")
+
+
+def copy_public_image(node, image_id, alias=""):
+    node = require_node(node)
+    if image_id not in PUBLIC_IMAGE_MAP:
+        raise ValueError("公共镜像无效")
+    if alias and not IMAGE_ALIAS_RE.fullmatch(alias):
+        raise ValueError("镜像别名只能包含字母、数字、点、斜杠、下划线和连字符")
+    args = ["image", "copy", image_id, f"{node}:"]
+    if alias:
+        args.extend(["--alias", alias])
+    run_incus(*args, timeout=1800)
+    return list_node_images(node)
+
+
+def import_local_image(node, filename, alias=""):
+    node = require_node(node)
+    if alias and not IMAGE_ALIAS_RE.fullmatch(alias):
+        raise ValueError("镜像别名只能包含字母、数字、点、斜杠、下划线和连字符")
+    args = ["image", "import", filename, f"{node}:"]
+    if alias:
+        args.extend(["--alias", alias])
+    run_incus(*args, timeout=1800)
+    return list_node_images(node)
+
+
+def delete_local_image(node, fingerprint):
+    node = require_node(node)
+    if not FINGERPRINT_RE.fullmatch(fingerprint):
+        raise ValueError("镜像指纹无效")
+    run_incus("image", "delete", f"{node}:{fingerprint}", timeout=180)
+
+
 def inspect_node(name, remote):
     address = (remote.get("Addrs") or [""])[0]
     try:
@@ -350,6 +521,15 @@ def inspect_node(name, remote):
         memory_reserved = max(int(memory.get("used", 0)), allocations["memory"])
         disk_reserved = max(disk_used, allocations["disk"])
         load = resources.get("load") or {}
+        try:
+            images = parse_node_images(
+                name,
+                json.loads(run_incus("image", "list", f"{name}:", "--format=json", timeout=30)),
+            )
+            image_error = ""
+        except Exception as exc:
+            images = []
+            image_error = str(exc)
         return {
             "name": name,
             "address": address,
@@ -371,6 +551,8 @@ def inspect_node(name, remote):
             "architecture": (resources.get("cpu") or {}).get("architecture", ""),
             "instance_count": len(instances),
             "instances": instances,
+            "images": images,
+            "image_error": image_error,
             "error": "",
         }
     except Exception as exc:
@@ -395,6 +577,8 @@ def inspect_node(name, remote):
             "architecture": "",
             "instance_count": 0,
             "instances": [],
+            "images": [],
+            "image_error": "",
             "error": str(exc),
         }
 
@@ -451,6 +635,14 @@ elif command -v apt-get >/dev/null 2>&1; then
     mkdir -p /run/sshd
     ssh-keygen -A
     service_name=ssh
+elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y openssh-server
+    ssh-keygen -A
+    service_name=sshd
+elif command -v yum >/dev/null 2>&1; then
+    yum install -y openssh-server
+    ssh-keygen -A
+    service_name=sshd
 else
     echo "当前镜像不支持自动安装 OpenSSH" >&2
     exit 1
@@ -570,14 +762,14 @@ def create_instance(data):
         raise ValueError("名称只能包含字母、数字和连字符，最长 63 位")
     if kind not in {"container", "virtual-machine"}:
         raise ValueError("实例类型无效")
-    if image not in ALLOWED_IMAGES:
-        raise ValueError("系统镜像无效")
     if not cpu.isdigit() or not 1 <= int(cpu) <= 128:
         raise ValueError("CPU 核心数无效")
     if not cpu_allowance.isdigit() or not 1 <= int(cpu_allowance) <= 100:
         raise ValueError("CPU 配额无效")
     if not SIZE_RE.fullmatch(memory) or not SIZE_RE.fullmatch(disk):
         raise ValueError("内存或磁盘格式无效")
+    resolved_image = resolve_image(node, image, kind)
+    validate_minimum_resources(memory, disk, resolved_image["profile"])
     if ingress and not RATE_RE.fullmatch(ingress):
         raise ValueError("入站网络速率格式无效")
     if egress and not RATE_RE.fullmatch(egress):
@@ -597,7 +789,7 @@ def create_instance(data):
         if not ssh_port:
             ssh_port = allocate_ssh_port(node)
         ssh_password = generate_ssh_password()
-        init_args = ["init", image, ref]
+        init_args = ["init", resolved_image["reference"], ref]
         if kind == "virtual-machine":
             init_args.append("--vm")
         init_args.extend([
@@ -725,7 +917,7 @@ with open(os.path.join(ASSET_DIR, "index.html"), encoding="utf-8") as html_file:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "IncusCNPanel/0.5"
+    server_version = "IncusCNPanel/0.6"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}", flush=True)
@@ -777,6 +969,38 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("请求内容长度无效")
         return json.loads(self.rfile.read(length))
 
+    def read_image_upload(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("镜像文件长度无效") from exc
+        if length < 1:
+            raise ValueError("请选择镜像文件")
+        if length > MAX_IMAGE_UPLOAD_BYTES:
+            raise ValueError(f"镜像文件不能超过 {format_bytes(MAX_IMAGE_UPLOAD_BYTES)}")
+        os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+        free = shutil.disk_usage(DATA_DIR).free
+        if free < length + 256 * 1024**2:
+            raise ValueError("控制端临时磁盘空间不足")
+        descriptor, filename = tempfile.mkstemp(prefix="image-", suffix=".tar", dir=DATA_DIR)
+        os.fchmod(descriptor, 0o600)
+        remaining = length
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("镜像文件上传不完整")
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+            return filename
+        except Exception:
+            try:
+                os.unlink(filename)
+            except FileNotFoundError:
+                pass
+            raise
+
     def session(self):
         clean_sessions()
         jar = cookies.SimpleCookie(self.headers.get("Cookie", ""))
@@ -816,11 +1040,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {
                     "nodes": nodes,
                     "instances": instances,
+                    "public_images": public_image_catalog(),
                     "operations": recent_operations(),
                     "csrf": auth[1]["csrf"],
                 })
             except Exception as exc:
                 self.send_json(500, {"error": str(exc)})
+            return
+        images_match = re.fullmatch(r"/api/nodes/([^/]+)/images", path)
+        if images_match:
+            auth = self.require_auth()
+            if not auth:
+                return
+            try:
+                node = require_node(images_match.group(1))
+                self.send_json(200, {
+                    "node": node,
+                    "images": list_node_images(node),
+                    "public_images": public_image_catalog(),
+                })
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
             return
         access_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/access", path)
         if access_match:
@@ -891,6 +1131,47 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 record_operation("node_add", name or "未知节点", name, "failed", str(exc))
                 self.send_json(400, {"error": str(exc)})
+            return
+        copy_match = re.fullmatch(r"/api/nodes/([^/]+)/images/copy", path)
+        if copy_match:
+            node = copy_match.group(1)
+            image_id = ""
+            try:
+                data = self.read_json()
+                image_id = str(data.get("image", ""))
+                alias = str(data.get("alias", "")).strip()
+                images = copy_public_image(node, image_id, alias)
+                record_operation("image_copy", image_id, node, message=alias)
+                self.send_json(201, {"ok": True, "images": images})
+            except subprocess.TimeoutExpired:
+                record_operation("image_copy", image_id or "未知镜像", node, "failed", "下载超时")
+                self.send_json(504, {"error": "镜像下载超时"})
+            except Exception as exc:
+                record_operation("image_copy", image_id or "未知镜像", node, "failed", str(exc))
+                self.send_json(400, {"error": str(exc)})
+            return
+        upload_match = re.fullmatch(r"/api/nodes/([^/]+)/images/upload", path)
+        if upload_match:
+            node = upload_match.group(1)
+            alias = self.headers.get("X-Image-Alias", "").strip()
+            filename = ""
+            try:
+                filename = self.read_image_upload()
+                images = import_local_image(node, filename, alias)
+                record_operation("image_upload", alias or "本地镜像", node)
+                self.send_json(201, {"ok": True, "images": images})
+            except subprocess.TimeoutExpired:
+                record_operation("image_upload", alias or "本地镜像", node, "failed", "导入超时")
+                self.send_json(504, {"error": "镜像导入超时"})
+            except Exception as exc:
+                record_operation("image_upload", alias or "本地镜像", node, "failed", str(exc))
+                self.send_json(400, {"error": str(exc)})
+            finally:
+                if filename:
+                    try:
+                        os.unlink(filename)
+                    except FileNotFoundError:
+                        pass
             return
         if path == "/api/instances":
             node = ""
@@ -981,6 +1262,18 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         auth = self.require_auth(csrf=True)
         if not auth:
+            return
+        image_match = re.fullmatch(r"/api/nodes/([^/]+)/images/([a-fA-F0-9]{12,64})", path)
+        if image_match:
+            node = image_match.group(1)
+            fingerprint = image_match.group(2)
+            try:
+                delete_local_image(node, fingerprint)
+                record_operation("image_delete", fingerprint[:12], node)
+                self.send_json(200, {"ok": True})
+            except Exception as exc:
+                record_operation("image_delete", fingerprint[:12], node, "failed", str(exc))
+                self.send_json(400, {"error": str(exc)})
             return
         node_match = re.fullmatch(r"/api/nodes/([^/]+)", path)
         if node_match:

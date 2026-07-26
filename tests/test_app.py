@@ -218,6 +218,71 @@ class ValidationTests(unittest.TestCase):
         ])
         self.assertEqual(app.allocate_ssh_port("node-a"), "22001")
 
+    def test_public_catalog_includes_profiles_for_lxc_and_kvm(self):
+        catalog = app.public_image_catalog()
+        ubuntu = next(image for image in catalog if image["id"] == "images:ubuntu/24.04")
+        self.assertEqual(ubuntu["source"], "public")
+        self.assertEqual(ubuntu["profiles"]["container"]["minimum_memory"], "512MiB")
+        self.assertEqual(ubuntu["profiles"]["virtual-machine"]["recommended_disk"], "12GiB")
+
+    def test_parse_node_images_exposes_local_fingerprint_and_profile(self):
+        images = app.parse_node_images("node-a", [{
+            "fingerprint": "a" * 64,
+            "aliases": [{"name": "custom/debian-12"}],
+            "properties": {"os": "Debian", "release": "12", "description": "Debian 12"},
+            "type": "container",
+            "architecture": "x86_64",
+            "size": 123456,
+        }])
+        self.assertEqual(images[0]["id"], f"local:{'a' * 64}")
+        self.assertEqual(images[0]["family"], "debian")
+        self.assertEqual(images[0]["profiles"]["container"]["minimum_disk"], "3GiB")
+
+    def test_resolve_local_image_is_node_scoped_and_type_checked(self):
+        local = {
+            "id": f"local:{'b' * 64}", "fingerprint": "b" * 64,
+            "kind": "container", "family": "alpine",
+        }
+        with mock.patch("app.list_node_images", return_value=[local]) as list_images:
+            resolved = app.resolve_image("node-a", f"local:{'b' * 12}", "container")
+            self.assertEqual(resolved["reference"], f"node-a:{'b' * 64}")
+            list_images.assert_called_once_with("node-a")
+            with self.assertRaisesRegex(ValueError, "仅支持 LXC"):
+                app.resolve_image("node-a", f"local:{'b' * 12}", "virtual-machine")
+
+    def test_image_management_builds_incus_commands(self):
+        with (
+            mock.patch("app.require_node", return_value="node-a"),
+            mock.patch("app.run_incus") as run_incus,
+            mock.patch("app.list_node_images", return_value=[]) as list_images,
+        ):
+            app.copy_public_image("node-a", "images:alpine/3.22", "cached/alpine")
+            app.import_local_image("node-a", "/private/image.tar", "custom/alpine")
+            app.delete_local_image("node-a", "c" * 64)
+        self.assertIn(
+            mock.call("image", "copy", "images:alpine/3.22", "node-a:", "--alias", "cached/alpine", timeout=1800),
+            run_incus.call_args_list,
+        )
+        self.assertIn(
+            mock.call("image", "import", "/private/image.tar", "node-a:", "--alias", "custom/alpine", timeout=1800),
+            run_incus.call_args_list,
+        )
+        self.assertIn(
+            mock.call("image", "delete", f"node-a:{'c' * 64}", timeout=180),
+            run_incus.call_args_list,
+        )
+        self.assertEqual(list_images.call_count, 2)
+
+    def test_create_rejects_resources_below_image_minimum(self):
+        with mock.patch("app.require_node", return_value="node-a"):
+            with self.assertRaisesRegex(ValueError, "最低需要 512MiB 内存"):
+                app.create_instance({
+                    "node": "node-a", "name": "too-small", "type": "container",
+                    "image": "images:ubuntu/24.04", "cpu": "1", "cpu_allowance": "100",
+                    "memory": "256MiB", "disk": "8GiB", "read_iops": "0",
+                    "write_iops": "0",
+                })
+
     def test_create_instance_applies_limits_and_provisions_ssh(self):
         access = {
             "host": "203.0.113.10",
