@@ -153,6 +153,193 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "必须包含时区"):
             app.parse_assignment_expiry("2026-08-01T00:00:00")
 
+    def test_notification_config_is_private_and_hides_bot_token(self):
+        old_values = (
+            app.DATA_DIR, app.NOTIFICATION_CONFIG_FILE, app.NOTIFICATIONS_FILE,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.NOTIFICATION_CONFIG_FILE = os.path.join(directory, "notification-config.json")
+                app.NOTIFICATIONS_FILE = os.path.join(directory, "notifications.json")
+                public = app.update_notification_config({
+                    "interval_seconds": 120,
+                    "thresholds": {"memory_percent": 85},
+                    "rules": {"node_offline": "panel_telegram"},
+                    "telegram": {
+                        "enabled": True,
+                        "bot_token": "123456789:abcdefghijklmnopqrstuvwxyz_123456",
+                        "chat_id": "-1001234567890",
+                        "send_recovery": False,
+                    },
+                })
+                self.assertEqual(os.stat(app.NOTIFICATION_CONFIG_FILE).st_mode & 0o777, 0o600)
+                self.assertTrue(public["telegram"]["token_configured"])
+                self.assertNotIn("bot_token", public["telegram"])
+                self.assertEqual(public["thresholds"]["memory_percent"], 85)
+                stored = app.read_notification_config()
+                self.assertEqual(
+                    stored["telegram"]["bot_token"],
+                    "123456789:abcdefghijklmnopqrstuvwxyz_123456",
+                )
+                self.assertFalse(stored["telegram"]["send_recovery"])
+        finally:
+            app.MONITOR_WAKE_EVENT.clear()
+            (
+                app.DATA_DIR, app.NOTIFICATION_CONFIG_FILE, app.NOTIFICATIONS_FILE,
+            ) = old_values
+
+    def test_detect_anomalies_covers_nodes_instances_and_missing_state(self):
+        config = app.default_notification_config()
+        config["rules"] = {key: "panel" for key in app.ALERT_RULES}
+        config["thresholds"] = {
+            "memory_percent": 80,
+            "disk_percent": 80,
+            "load_percent": 100,
+            "instance_memory_percent": 90,
+            "instance_cpu_percent": 90,
+        }
+        nodes = [
+            {
+                "name": "node-offline", "status": "offline", "error": "timeout",
+                "memory": 0, "memory_used": 0, "disk": 0, "disk_used": 0,
+                "load": 0, "cpu": 0, "image_error": "",
+            },
+            {
+                "name": "node-a", "status": "online", "error": "",
+                "memory": 1000, "memory_used": 900, "disk": 1000, "disk_used": 850,
+                "load": 3, "cpu": 2, "image_error": "catalog failed",
+            },
+        ]
+        instances = [
+            {"node": "node-a", "name": "stopped", "status": "Stopped", "ipv4": ""},
+            {
+                "node": "node-a", "name": "no-ip", "status": "Running", "ipv4": "",
+                "memory_used_bytes": 95, "memory_total_bytes": 100,
+                "cpu_usage_ns": 61_000_000_000, "cpu_allocated_ns": 1_000_000_000,
+            },
+        ]
+        previous = {
+            "initialized": True,
+            "captured_at": (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat(),
+            "nodes": {"node-a": "online"},
+            "instances": {
+                "node-a/missing": "Running",
+                "node-a/no-ip": {"status": "Running", "cpu_usage_ns": 1_000_000_000},
+            },
+        }
+        anomalies, snapshot = app.detect_anomalies(nodes, instances, config, previous)
+        self.assertEqual(set(anomalies), {
+            "node_offline:node-offline",
+            "node_memory_high:node-a",
+            "node_disk_high:node-a",
+            "node_load_high:node-a",
+            "node_image_error:node-a",
+            "instance_memory_high:node-a/no-ip",
+            "instance_cpu_high:node-a/no-ip",
+            "instance_not_running:node-a/stopped",
+            "instance_no_ipv4:node-a/no-ip",
+            "instance_missing:node-a/missing",
+        })
+        self.assertTrue(snapshot["initialized"])
+        first_scan, _ = app.detect_anomalies(nodes, instances, config, {})
+        self.assertNotIn("instance_missing:node-a/missing", first_scan)
+
+    def test_notification_events_are_deduplicated_and_resolved(self):
+        old_values = (
+            app.DATA_DIR, app.NOTIFICATION_CONFIG_FILE, app.NOTIFICATIONS_FILE,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.NOTIFICATION_CONFIG_FILE = os.path.join(directory, "notification-config.json")
+                app.NOTIFICATIONS_FILE = os.path.join(directory, "notifications.json")
+                config = app.default_notification_config()
+                config["telegram"].update({
+                    "enabled": True,
+                    "bot_token": "123456789:abcdefghijklmnopqrstuvwxyz_123456",
+                    "chat_id": "-1001234567890",
+                })
+                anomaly = app._anomaly(
+                    "node_offline:node-a", "node_offline", "node-a", "node-a",
+                    "宿主机 node-a 离线", "timeout",
+                )
+                snapshot = {"initialized": True, "nodes": {"node-a": "offline"}, "instances": {}}
+                with mock.patch("app.send_telegram_message") as send_telegram:
+                    app._persist_anomalies(config, {anomaly["key"]: anomaly}, snapshot)
+                    app._persist_anomalies(config, {anomaly["key"]: anomaly}, snapshot)
+                    self.assertEqual(send_telegram.call_count, 1)
+                    app._persist_anomalies(config, {}, snapshot)
+                    self.assertEqual(send_telegram.call_count, 2)
+                data = app.read_notification_data()
+                self.assertEqual(len(data["active"]), 0)
+                self.assertEqual(len(data["events"]), 2)
+                payload = app.notification_payload()
+                self.assertEqual(payload["active_count"], 0)
+                self.assertEqual(len(payload["events"]), 2)
+                self.assertEqual(payload["events"][0]["kind"], "recovery")
+                self.assertEqual(os.stat(app.NOTIFICATIONS_FILE).st_mode & 0o777, 0o600)
+                read_payload = app.mark_notifications_read()
+                self.assertEqual(read_payload["unread_count"], 0)
+        finally:
+            (
+                app.DATA_DIR, app.NOTIFICATION_CONFIG_FILE, app.NOTIFICATIONS_FILE,
+            ) = old_values
+
+    def test_telegram_delivery_errors_redact_bot_token(self):
+        old_values = (
+            app.DATA_DIR, app.NOTIFICATION_CONFIG_FILE, app.NOTIFICATIONS_FILE,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.NOTIFICATION_CONFIG_FILE = os.path.join(directory, "notification-config.json")
+                app.NOTIFICATIONS_FILE = os.path.join(directory, "notifications.json")
+                config = app.default_notification_config()
+                token = "123456789:abcdefghijklmnopqrstuvwxyz_123456"
+                config["telegram"].update({
+                    "enabled": True,
+                    "bot_token": token,
+                    "chat_id": "-1001234567890",
+                })
+                anomaly = app._anomaly(
+                    "node_offline:node-a", "node_offline", "node-a", "node-a",
+                    "宿主机 node-a 离线", "timeout",
+                )
+                snapshot = {"initialized": True, "nodes": {}, "instances": {}}
+                error = f"request failed at https://api.telegram.org/bot{token}/sendMessage"
+                with mock.patch("app.send_telegram_message", side_effect=RuntimeError(error)):
+                    app._persist_anomalies(config, {anomaly["key"]: anomaly}, snapshot)
+                data = app.read_notification_data()
+                self.assertNotIn(token, json.dumps(data))
+                self.assertIn("bot***/sendMessage", data["telegram_last_error"])
+        finally:
+            (
+                app.DATA_DIR, app.NOTIFICATION_CONFIG_FILE, app.NOTIFICATIONS_FILE,
+            ) = old_values
+
+    def test_telegram_sender_posts_structured_message(self):
+        config = app.default_notification_config()
+        config["telegram"].update({
+            "bot_token": "123456789:abcdefghijklmnopqrstuvwxyz_123456",
+            "chat_id": "-1001234567890",
+        })
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"ok":true}'
+        with mock.patch("app.urlopen", return_value=response) as urlopen:
+            self.assertTrue(app.send_telegram_message(config, "test message"))
+        request = urlopen.call_args.args[0]
+        self.assertIn(config["telegram"]["bot_token"], request.full_url)
+        self.assertEqual(json.loads(request.data)["chat_id"], "-1001234567890")
+        self.assertEqual(json.loads(request.data)["text"], "test message")
+        self.assertEqual(
+            app.redact_telegram_token(
+                f"https://api.telegram.org/bot{config['telegram']['bot_token']}/sendMessage",
+                config["telegram"]["bot_token"],
+            ),
+            "https://api.telegram.org/bot***/sendMessage",
+        )
+
     def test_http_permissions_enforce_active_instance_assignments(self):
         old_values = (app.DATA_DIR, app.USERS_FILE)
         app.SESSIONS.clear()
@@ -202,7 +389,9 @@ class ValidationTests(unittest.TestCase):
                      mock.patch("app.record_operation"), \
                      mock.patch("app.run_incus") as run_incus:
                     self.assertEqual(request("GET", "/api/users")[0], 403)
+                    self.assertEqual(request("GET", "/api/notifications")[0], 403)
                     self.assertEqual(request("POST", "/api/instances", {})[0], 403)
+                    self.assertEqual(request("POST", "/api/notifications/scan", {})[0], 403)
                     self.assertEqual(request("DELETE", "/api/users/customer-03")[0], 403)
                     status, data = request(
                         "GET", "/api/nodes/node-a/instances/web-01/access"
@@ -346,6 +535,8 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(instances[0]["image"], "images:alpine/edge")
         self.assertEqual(instances[0]["port_start"], "10000")
         self.assertEqual(instances[0]["port_end"], "10010")
+        self.assertEqual(instances[0]["memory_used_bytes"], 0)
+        self.assertEqual(instances[0]["cpu_usage_ns"], 0)
 
     def test_operation_log_is_persistent_and_newest_first(self):
         old_values = (app.DATA_DIR, app.OPERATIONS_FILE)

@@ -16,7 +16,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 HOST = os.environ.get("PANEL_HOST", "127.0.0.1")
@@ -31,6 +33,8 @@ DATA_DIR = os.environ.get("PANEL_DATA_DIR", "/var/lib/incus-cn-panel")
 OPERATIONS_FILE = os.path.join(DATA_DIR, "operations.jsonl")
 CREDENTIALS_FILE = os.path.join(DATA_DIR, "credentials.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
+NOTIFICATION_CONFIG_FILE = os.path.join(DATA_DIR, "notification-config.json")
+NOTIFICATIONS_FILE = os.path.join(DATA_DIR, "notifications.json")
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 SESSIONS = {}
 LOGIN_ATTEMPTS = {}
@@ -39,6 +43,9 @@ INSTANCE_MUTATION_LOCK = threading.RLock()
 OPERATION_LOCK = threading.Lock()
 CREDENTIALS_LOCK = threading.Lock()
 USERS_LOCK = threading.Lock()
+NOTIFICATION_LOCK = threading.RLock()
+MONITOR_SCAN_LOCK = threading.Lock()
+MONITOR_WAKE_EVENT = threading.Event()
 SESSION_TTL = 12 * 60 * 60
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,31}$")
@@ -55,6 +62,7 @@ MAX_PORTS_PER_INSTANCE = 1000
 USER_PASSWORD_ITERATIONS = 260000
 MAX_USER_ASSIGNMENTS = 500
 MAX_JSON_BODY_BYTES = 128 * 1024
+MAX_NOTIFICATION_EVENTS = 500
 MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", str(8 * 1024**3)))
 RESOURCE_PROFILES = {
     "alpine": {
@@ -89,6 +97,74 @@ PUBLIC_IMAGES = (
     {"id": "images:rockylinux/9", "label": "Rocky Linux 9", "family": "rhel", "release": "9", "channel": "稳定版"},
 )
 PUBLIC_IMAGE_MAP = {image["id"]: image for image in PUBLIC_IMAGES}
+ALERT_RULES = {
+    "monitor_failure": {
+        "label": "控制端巡检任务失败",
+        "description": "控制端无法读取节点列表或完成本轮巡检。",
+        "severity": "critical",
+        "default_mode": "panel_telegram",
+    },
+    "node_offline": {
+        "label": "宿主机离线或 Incus API 无法连接",
+        "description": "连接超时、TLS/证书错误、Incus 服务停止或网络中断。",
+        "severity": "critical",
+        "default_mode": "panel_telegram",
+    },
+    "node_memory_high": {
+        "label": "宿主机内存使用率过高",
+        "description": "达到设定阈值后告警，恢复到阈值以下时自动解除。",
+        "severity": "warning",
+        "default_mode": "panel_telegram",
+    },
+    "node_disk_high": {
+        "label": "宿主机存储池使用率过高",
+        "description": "default 存储池达到设定阈值，可能导致实例写入失败。",
+        "severity": "critical",
+        "default_mode": "panel_telegram",
+    },
+    "node_load_high": {
+        "label": "宿主机 1 分钟负载过高",
+        "description": "按 1 分钟负载与 CPU 核心数的比例判断。",
+        "severity": "warning",
+        "default_mode": "panel",
+    },
+    "node_image_error": {
+        "label": "宿主机镜像查询失败",
+        "description": "Incus 在线，但本地镜像目录读取失败。",
+        "severity": "warning",
+        "default_mode": "panel",
+    },
+    "instance_memory_high": {
+        "label": "实例内存使用率过高",
+        "description": "按实例当前用量与 Incus 内存上限的比例判断。",
+        "severity": "warning",
+        "default_mode": "panel",
+    },
+    "instance_cpu_high": {
+        "label": "实例持续 CPU 使用率过高",
+        "description": "从相邻两次巡检的 CPU 时间差计算，首次巡检不会触发。",
+        "severity": "warning",
+        "default_mode": "off",
+    },
+    "instance_not_running": {
+        "label": "实例不在运行状态",
+        "description": "包括管理员主动停止，适合要求实例持续运行的场景。",
+        "severity": "critical",
+        "default_mode": "off",
+    },
+    "instance_no_ipv4": {
+        "label": "运行中的实例没有 IPv4",
+        "description": "可能是网桥、DHCP、系统网络或 Incus Agent 异常。",
+        "severity": "warning",
+        "default_mode": "off",
+    },
+    "instance_missing": {
+        "label": "实例从在线宿主机消失",
+        "description": "检测到实例被外部删除或未被 Incus 返回；首次巡检不会触发。",
+        "severity": "critical",
+        "default_mode": "off",
+    },
+}
 
 
 def run_incus(*args, timeout=120):
@@ -571,6 +647,8 @@ def parse_instances(node, raw):
     instances = []
     for item in raw:
         state = item.get("state") or {}
+        memory_state = state.get("memory") or {}
+        cpu_state = state.get("cpu") or {}
         ipv4 = ""
         for interface in (state.get("network") or {}).values():
             for address in interface.get("addresses", []):
@@ -599,6 +677,10 @@ def parse_instances(node, raw):
             "ssh_port": config.get("user.incus-cn-panel.ssh-port", ""),
             "port_start": config.get("user.incus-cn-panel.port-start", ""),
             "port_end": config.get("user.incus-cn-panel.port-end", ""),
+            "memory_used_bytes": int(memory_state.get("usage", 0) or 0),
+            "memory_total_bytes": int(memory_state.get("total", 0) or 0),
+            "cpu_usage_ns": int(cpu_state.get("usage", 0) or 0),
+            "cpu_allocated_ns": int(cpu_state.get("allocated_time", 0) or 0),
         })
     return instances
 
@@ -848,6 +930,536 @@ def overview():
     return nodes, instances
 
 
+def default_notification_config():
+    return {
+        "enabled": True,
+        "interval_seconds": 60,
+        "thresholds": {
+            "memory_percent": 90,
+            "disk_percent": 90,
+            "load_percent": 150,
+            "instance_memory_percent": 90,
+            "instance_cpu_percent": 90,
+        },
+        "rules": {
+            key: definition["default_mode"] for key, definition in ALERT_RULES.items()
+        },
+        "telegram": {
+            "enabled": False,
+            "bot_token": "",
+            "chat_id": "",
+            "send_recovery": True,
+        },
+    }
+
+
+def default_notification_data():
+    return {
+        "version": 1,
+        "active": {},
+        "events": [],
+        "snapshot": {"initialized": False, "nodes": {}, "instances": {}},
+        "last_check": "",
+        "last_error": "",
+        "telegram_last_error": "",
+    }
+
+
+def _read_private_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return default
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"无法读取 {os.path.basename(path)}: {exc}") from exc
+    return data if isinstance(data, dict) else default
+
+
+def _write_private_json(path, data):
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    temporary = f"{path}.{os.getpid()}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def read_notification_config():
+    with NOTIFICATION_LOCK:
+        saved = _read_private_json(NOTIFICATION_CONFIG_FILE, {})
+    config = default_notification_config()
+    if not saved:
+        return config
+    config["enabled"] = bool(saved.get("enabled", config["enabled"]))
+    config["interval_seconds"] = int(saved.get("interval_seconds", config["interval_seconds"]))
+    config["thresholds"].update(saved.get("thresholds", {}))
+    config["rules"].update(saved.get("rules", {}))
+    config["telegram"].update(saved.get("telegram", {}))
+    return config
+
+
+def public_notification_config(config=None):
+    config = config or read_notification_config()
+    telegram = config["telegram"]
+    return {
+        "enabled": config["enabled"],
+        "interval_seconds": config["interval_seconds"],
+        "thresholds": dict(config["thresholds"]),
+        "rules": dict(config["rules"]),
+        "rule_definitions": [
+            {"key": key, **definition} for key, definition in ALERT_RULES.items()
+        ],
+        "telegram": {
+            "enabled": telegram["enabled"],
+            "chat_id": telegram["chat_id"],
+            "send_recovery": telegram["send_recovery"],
+            "token_configured": bool(telegram["bot_token"]),
+        },
+    }
+
+
+def normalize_notification_config(payload, existing=None):
+    if not isinstance(payload, dict):
+        raise ValueError("通知配置格式无效")
+    config = existing or read_notification_config()
+    config = json.loads(json.dumps(config))
+    if "enabled" in payload:
+        if not isinstance(payload["enabled"], bool):
+            raise ValueError("巡检状态无效")
+        config["enabled"] = payload["enabled"]
+    if "interval_seconds" in payload:
+        interval = int(payload["interval_seconds"])
+        if not 30 <= interval <= 3600:
+            raise ValueError("巡检间隔必须在 30 到 3600 秒之间")
+        config["interval_seconds"] = interval
+    thresholds = payload.get("thresholds")
+    if thresholds is not None:
+        if not isinstance(thresholds, dict):
+            raise ValueError("告警阈值格式无效")
+        limits = {
+            "memory_percent": (50, 99),
+            "disk_percent": (50, 99),
+            "load_percent": (50, 1000),
+            "instance_memory_percent": (50, 99),
+            "instance_cpu_percent": (50, 1000),
+        }
+        for key, (minimum, maximum) in limits.items():
+            if key not in thresholds:
+                continue
+            value = int(thresholds[key])
+            if not minimum <= value <= maximum:
+                raise ValueError(f"{key} 阈值必须在 {minimum} 到 {maximum} 之间")
+            config["thresholds"][key] = value
+    rules = payload.get("rules")
+    if rules is not None:
+        if not isinstance(rules, dict):
+            raise ValueError("异常规则格式无效")
+        for key, mode in rules.items():
+            if key not in ALERT_RULES or mode not in {"off", "panel", "panel_telegram"}:
+                raise ValueError("异常规则或通知方式无效")
+            config["rules"][key] = mode
+    telegram = payload.get("telegram")
+    if telegram is not None:
+        if not isinstance(telegram, dict):
+            raise ValueError("Telegram 配置格式无效")
+        for key in ("enabled", "send_recovery"):
+            if key in telegram:
+                if not isinstance(telegram[key], bool):
+                    raise ValueError("Telegram 开关无效")
+                config["telegram"][key] = telegram[key]
+        if telegram.get("clear_token"):
+            config["telegram"]["bot_token"] = ""
+        token = str(telegram.get("bot_token", "")).strip()
+        if token:
+            if not re.fullmatch(r"[0-9]{5,15}:[A-Za-z0-9_-]{20,80}", token):
+                raise ValueError("Telegram Bot Token 格式无效")
+            config["telegram"]["bot_token"] = token
+        if "chat_id" in telegram:
+            chat_id = str(telegram["chat_id"]).strip()
+            if chat_id and not re.fullmatch(r"(?:-?[0-9]{5,20}|@[A-Za-z0-9_]{5,32})", chat_id):
+                raise ValueError("Telegram Chat ID 格式无效")
+            config["telegram"]["chat_id"] = chat_id
+    if config["telegram"]["enabled"] and (
+        not config["telegram"]["bot_token"] or not config["telegram"]["chat_id"]
+    ):
+        raise ValueError("启用 Telegram 前必须填写 Bot Token 和 Chat ID")
+    return config
+
+
+def update_notification_config(payload):
+    config = normalize_notification_config(payload)
+    with NOTIFICATION_LOCK:
+        _write_private_json(NOTIFICATION_CONFIG_FILE, config)
+    MONITOR_WAKE_EVENT.set()
+    return public_notification_config(config)
+
+
+def read_notification_data():
+    with NOTIFICATION_LOCK:
+        data = _read_private_json(NOTIFICATIONS_FILE, default_notification_data())
+    defaults = default_notification_data()
+    for key, value in defaults.items():
+        data.setdefault(key, value)
+    if not isinstance(data["active"], dict):
+        data["active"] = {}
+    if not isinstance(data["events"], list):
+        data["events"] = []
+    if not isinstance(data["snapshot"], dict):
+        data["snapshot"] = defaults["snapshot"]
+    return data
+
+
+def notification_payload():
+    config = read_notification_config()
+    data = read_notification_data()
+    active = sorted(
+        data["active"].values(),
+        key=lambda item: (item.get("severity") != "critical", item.get("first_seen", "")),
+    )
+    events = data["events"][:200]
+    return {
+        "config": public_notification_config(config),
+        "active": active,
+        "events": events,
+        "active_count": len(active),
+        "unread_count": sum(
+            not event.get("read", False) for event in data["events"]
+        ),
+        "last_check": data.get("last_check", ""),
+        "last_error": data.get("last_error", ""),
+        "telegram_last_error": data.get("telegram_last_error", ""),
+    }
+
+
+def mark_notifications_read():
+    with NOTIFICATION_LOCK:
+        data = _read_private_json(NOTIFICATIONS_FILE, default_notification_data())
+        for event in data.get("events", []):
+            event["read"] = True
+        _write_private_json(NOTIFICATIONS_FILE, data)
+    return notification_payload()
+
+
+def rule_enabled(config, key):
+    return config["rules"].get(key, "off") != "off"
+
+
+def _anomaly(key, kind, target, node, title, message):
+    definition = ALERT_RULES[kind]
+    return {
+        "key": key,
+        "type": kind,
+        "severity": definition["severity"],
+        "target": target,
+        "node": node,
+        "title": title,
+        "message": str(message).replace("\n", " ")[:500],
+    }
+
+
+def detect_anomalies(nodes, instances, config, previous_snapshot=None):
+    anomalies = {}
+    thresholds = config["thresholds"]
+    node_statuses = {node["name"]: node["status"] for node in nodes}
+    for node in nodes:
+        name = node["name"]
+        if node["status"] != "online":
+            if rule_enabled(config, "node_offline"):
+                anomalies[f"node_offline:{name}"] = _anomaly(
+                    f"node_offline:{name}", "node_offline", name, name,
+                    f"宿主机 {name} 离线", node.get("error") or "无法连接 Incus API",
+                )
+            continue
+        memory_percent = node["memory_used"] / node["memory"] * 100 if node["memory"] else 0
+        disk_percent = node["disk_used"] / node["disk"] * 100 if node["disk"] else 0
+        load_percent = node["load"] / node["cpu"] * 100 if node["cpu"] else 0
+        if rule_enabled(config, "node_memory_high") and memory_percent >= thresholds["memory_percent"]:
+            key = f"node_memory_high:{name}"
+            anomalies[key] = _anomaly(
+                key, "node_memory_high", name, name, f"宿主机 {name} 内存使用率过高",
+                f"当前 {memory_percent:.1f}%，阈值 {thresholds['memory_percent']}%",
+            )
+        if rule_enabled(config, "node_disk_high") and disk_percent >= thresholds["disk_percent"]:
+            key = f"node_disk_high:{name}"
+            anomalies[key] = _anomaly(
+                key, "node_disk_high", name, name, f"宿主机 {name} 存储空间不足",
+                f"当前 {disk_percent:.1f}%，阈值 {thresholds['disk_percent']}%",
+            )
+        if rule_enabled(config, "node_load_high") and load_percent >= thresholds["load_percent"]:
+            key = f"node_load_high:{name}"
+            anomalies[key] = _anomaly(
+                key, "node_load_high", name, name, f"宿主机 {name} 负载过高",
+                f"1 分钟负载 {node['load']:.2f} / {node['cpu']} 核，比例 {load_percent:.1f}%",
+            )
+        if rule_enabled(config, "node_image_error") and node.get("image_error"):
+            key = f"node_image_error:{name}"
+            anomalies[key] = _anomaly(
+                key, "node_image_error", name, name, f"宿主机 {name} 镜像查询失败",
+                node["image_error"],
+            )
+    previous_snapshot = previous_snapshot or {}
+    previous_instances = previous_snapshot.get("instances", {})
+    try:
+        previous_check = datetime.fromisoformat(
+            str(previous_snapshot.get("captured_at", "")).replace("Z", "+00:00")
+        )
+        elapsed = (datetime.now(timezone.utc) - previous_check).total_seconds()
+    except ValueError:
+        elapsed = 0
+    current_instances = {}
+    for instance in instances:
+        node = instance["node"]
+        name = instance["name"]
+        instance_key = f"{node}/{name}"
+        current_instances[instance_key] = {
+            "status": instance["status"],
+            "cpu_usage_ns": int(instance.get("cpu_usage_ns", 0) or 0),
+        }
+        memory_total = int(instance.get("memory_total_bytes", 0) or 0)
+        memory_used = int(instance.get("memory_used_bytes", 0) or 0)
+        memory_percent = memory_used / memory_total * 100 if memory_total else 0
+        if rule_enabled(config, "instance_memory_high") and memory_percent >= thresholds["instance_memory_percent"]:
+            key = f"instance_memory_high:{instance_key}"
+            anomalies[key] = _anomaly(
+                key, "instance_memory_high", name, node, f"实例 {name} 内存使用率过高",
+                f"当前 {memory_percent:.1f}%，阈值 {thresholds['instance_memory_percent']}%",
+            )
+        previous = previous_instances.get(instance_key, {})
+        if not isinstance(previous, dict):
+            previous = {}
+        cpu_usage = int(instance.get("cpu_usage_ns", 0) or 0)
+        previous_cpu_usage = int(previous.get("cpu_usage_ns", 0) or 0)
+        allocated_time = int(instance.get("cpu_allocated_ns", 0) or 0)
+        cpu_percent = (
+            (cpu_usage - previous_cpu_usage) / elapsed / allocated_time * 100
+            if elapsed > 0 and allocated_time > 0 and cpu_usage >= previous_cpu_usage
+            else 0
+        )
+        if rule_enabled(config, "instance_cpu_high") and cpu_percent >= thresholds["instance_cpu_percent"]:
+            key = f"instance_cpu_high:{instance_key}"
+            anomalies[key] = _anomaly(
+                key, "instance_cpu_high", name, node, f"实例 {name} CPU 使用率过高",
+                f"巡检周期平均 {cpu_percent:.1f}%，阈值 {thresholds['instance_cpu_percent']}%",
+            )
+        if rule_enabled(config, "instance_not_running") and instance["status"] != "Running":
+            key = f"instance_not_running:{instance_key}"
+            anomalies[key] = _anomaly(
+                key, "instance_not_running", name, node, f"实例 {name} 未运行",
+                f"宿主机 {node} 返回状态 {instance['status']}",
+            )
+        if rule_enabled(config, "instance_no_ipv4") and instance["status"] == "Running" and not instance.get("ipv4"):
+            key = f"instance_no_ipv4:{instance_key}"
+            anomalies[key] = _anomaly(
+                key, "instance_no_ipv4", name, node, f"实例 {name} 没有 IPv4",
+                f"实例正在 {node} 运行，但未检测到全局 IPv4 地址",
+            )
+    if previous_snapshot.get("initialized") and rule_enabled(config, "instance_missing"):
+        previous_nodes = previous_snapshot.get("nodes", {})
+        for instance_key in previous_snapshot.get("instances", {}):
+            if instance_key in current_instances:
+                continue
+            node, name = instance_key.split("/", 1)
+            if previous_nodes.get(node) != "online" or node_statuses.get(node) != "online":
+                continue
+            key = f"instance_missing:{instance_key}"
+            anomalies[key] = _anomaly(
+                key, "instance_missing", name, node, f"实例 {name} 从宿主机消失",
+                f"宿主机 {node} 在线，但本轮巡检未返回该实例",
+            )
+    snapshot = {
+        "initialized": True,
+        "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "nodes": node_statuses,
+        "instances": current_instances,
+    }
+    return anomalies, snapshot
+
+
+def telegram_text(event):
+    prefix = "[严重]" if event["severity"] == "critical" else "[警告]"
+    if event["kind"] == "recovery":
+        prefix = "[恢复]"
+    lines = [
+        f"{prefix} Incus Control",
+        event["title"],
+        event["message"],
+    ]
+    if event.get("node"):
+        lines.append(f"宿主机: {event['node']}")
+    lines.append(f"时间: {event['time']}")
+    return "\n".join(lines)
+
+
+def redact_telegram_token(value, token):
+    return str(value).replace(str(token), "***")
+
+
+def send_telegram_message(config, text):
+    telegram = config["telegram"]
+    if not telegram.get("bot_token") or not telegram.get("chat_id"):
+        raise ValueError("Telegram Bot Token 或 Chat ID 尚未配置")
+    body = json.dumps({
+        "chat_id": telegram["chat_id"],
+        "text": text,
+        "disable_web_page_preview": True,
+    }).encode()
+    request = Request(
+        f"https://api.telegram.org/bot{telegram['bot_token']}/sendMessage",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            result = json.loads(response.read())
+    except HTTPError as exc:
+        try:
+            detail = json.loads(exc.read()).get("description", str(exc))
+        except Exception:
+            detail = str(exc)
+        detail = redact_telegram_token(detail, telegram["bot_token"])
+        raise RuntimeError(f"Telegram API 错误: {detail}") from exc
+    except (URLError, TimeoutError) as exc:
+        detail = redact_telegram_token(exc, telegram["bot_token"])
+        raise RuntimeError(f"无法连接 Telegram API: {detail}") from exc
+    if not result.get("ok"):
+        raise RuntimeError(f"Telegram 发送失败: {result.get('description', '未知错误')}")
+    return True
+
+
+def _update_notification_delivery(event_id, status, error=""):
+    with NOTIFICATION_LOCK:
+        data = _read_private_json(NOTIFICATIONS_FILE, default_notification_data())
+        for event in data.get("events", []):
+            if event.get("id") == event_id:
+                event["telegram_status"] = status
+                event["telegram_error"] = str(error)[:300]
+                break
+        data["telegram_last_error"] = str(error)[:300] if status == "failed" else ""
+        _write_private_json(NOTIFICATIONS_FILE, data)
+
+
+def _persist_anomalies(config, anomalies, snapshot, scan_error=""):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    outgoing = []
+    with NOTIFICATION_LOCK:
+        data = _read_private_json(NOTIFICATIONS_FILE, default_notification_data())
+        previous_active = data.get("active", {})
+        active = {}
+        events = data.get("events", [])
+        for key, anomaly in anomalies.items():
+            if key in previous_active:
+                current = {**previous_active[key], **anomaly, "last_seen": now}
+            else:
+                current = {**anomaly, "first_seen": now, "last_seen": now}
+                event = {
+                    **anomaly,
+                    "id": secrets.token_urlsafe(12),
+                    "kind": "alert",
+                    "time": now,
+                    "read": False,
+                    "telegram_status": "not_sent",
+                    "telegram_error": "",
+                }
+                events.insert(0, event)
+                outgoing.append(event)
+            active[key] = current
+        for key, previous in previous_active.items():
+            if key in anomalies:
+                continue
+            event = {
+                **previous,
+                "id": secrets.token_urlsafe(12),
+                "kind": "recovery",
+                "title": f"已恢复：{previous['title']}",
+                "message": "本轮巡检已不再检测到该异常。",
+                "time": now,
+                "read": False,
+                "telegram_status": "not_sent",
+                "telegram_error": "",
+            }
+            events.insert(0, event)
+            outgoing.append(event)
+        data.update({
+            "version": 1,
+            "active": active,
+            "events": events[:MAX_NOTIFICATION_EVENTS],
+            "snapshot": snapshot,
+            "last_check": now,
+            "last_error": str(scan_error)[:500],
+        })
+        _write_private_json(NOTIFICATIONS_FILE, data)
+    telegram = config["telegram"]
+    if telegram.get("enabled"):
+        for event in outgoing:
+            mode = config["rules"].get(event["type"], "off")
+            if mode != "panel_telegram" or (event["kind"] == "recovery" and not telegram.get("send_recovery")):
+                continue
+            try:
+                send_telegram_message(config, telegram_text(event))
+                _update_notification_delivery(event["id"], "sent")
+            except Exception as exc:
+                error = redact_telegram_token(exc, telegram.get("bot_token", ""))
+                _update_notification_delivery(event["id"], "failed", error)
+    return notification_payload()
+
+
+def run_monitor_scan(force=False):
+    with MONITOR_SCAN_LOCK:
+        config = read_notification_config()
+        if not config["enabled"] and not force:
+            return notification_payload()
+        data = read_notification_data()
+        try:
+            nodes, instances = overview()
+            anomalies, snapshot = detect_anomalies(nodes, instances, config, data.get("snapshot"))
+            return _persist_anomalies(config, anomalies, snapshot)
+        except Exception as exc:
+            anomalies = {
+                key: dict(value) for key, value in data.get("active", {}).items()
+                if value.get("type") != "monitor_failure"
+            }
+            if rule_enabled(config, "monitor_failure"):
+                key = "monitor_failure:controller"
+                anomalies[key] = _anomaly(
+                    key, "monitor_failure", "控制端", "", "控制端巡检任务失败", str(exc)
+                )
+            return _persist_anomalies(
+                config, anomalies, data.get("snapshot", default_notification_data()["snapshot"]), exc
+            )
+
+
+def test_telegram_notification():
+    config = read_notification_config()
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    send_telegram_message(config, f"[测试] Incus Control\nTelegram 异常通知连接正常。\n时间: {now}")
+    return True
+
+
+def monitor_loop():
+    while True:
+        try:
+            config = read_notification_config()
+            if config["enabled"]:
+                run_monitor_scan()
+            interval = config["interval_seconds"]
+        except Exception as exc:
+            print(f"异常巡检失败: {exc}", flush=True)
+            interval = 60
+        MONITOR_WAKE_EVENT.wait(interval)
+        MONITOR_WAKE_EVENT.clear()
+
+
 def overview_for_session(session):
     nodes, instances = overview()
     account = {"username": session["username"], "role": session["role"]}
@@ -859,6 +1471,7 @@ def overview_for_session(session):
             "public_images": public_image_catalog(),
             "operations": recent_operations(),
             "users": list_user_accounts(),
+            "notifications": notification_payload(),
         }
     record = get_user_account(session["username"]) or {}
     active = {
@@ -887,6 +1500,7 @@ def overview_for_session(session):
         "public_images": [],
         "operations": [],
         "users": [],
+        "notifications": {},
     }
 
 
@@ -1327,7 +1941,7 @@ class PanelServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "IncusCNPanel/0.8"
+    server_version = "IncusCNPanel/0.9"
 
     def setup(self):
         super().setup()
@@ -1482,6 +2096,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json(200, {"users": list_user_accounts()})
             return
+        if path == "/api/notifications":
+            auth = self.require_admin()
+            if not auth:
+                return
+            self.send_json(200, {"notifications": notification_payload()})
+            return
         images_match = re.fullmatch(r"/api/nodes/([^/]+)/images", path)
         if images_match:
             auth = self.require_admin()
@@ -1553,6 +2173,47 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/logout":
             SESSIONS.pop(auth[0], None)
             self.send_json(200, {"ok": True}, {"Set-Cookie": "incus_cn_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"})
+            return
+        if path == "/api/notifications/config":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                config = update_notification_config(self.read_json())
+                record_operation("notification_config", "异常通知", message="更新巡检与 Telegram 配置")
+                self.send_json(200, {"ok": True, "config": config})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path == "/api/notifications/scan":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                notifications = run_monitor_scan(force=True)
+                self.send_json(200, {"ok": True, "notifications": notifications})
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
+            return
+        if path == "/api/notifications/read":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                notifications = mark_notifications_read()
+                self.send_json(200, {"ok": True, "notifications": notifications})
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
+            return
+        if path == "/api/notifications/telegram/test":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                test_telegram_notification()
+                self.send_json(200, {"ok": True})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
             return
         if path == "/api/users":
             if auth[1].get("role") != "admin":
@@ -1824,6 +2485,7 @@ def main():
         server_side=True,
         do_handshake_on_connect=False,
     )
+    threading.Thread(target=monitor_loop, name="notification-monitor", daemon=True).start()
     print(f"Incus 中文集群面板正在监听 https://{HOST}:{PORT}", flush=True)
     server.serve_forever()
 

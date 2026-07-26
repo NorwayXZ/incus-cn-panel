@@ -33,6 +33,9 @@
 - 创建、停用、重置和删除普通账户，并将指定实例授权给普通账户
 - 实例授权支持 1、2、3、6、12 个月或自定义到期日；到期后服务端立即拒绝访问
 - 普通账户只能查看自己的有效授权、SSH 信息，并启动、停止或重启获授权实例
+- 后台定时巡检宿主机离线、内存/磁盘/负载过高、镜像查询失败，以及实例状态、IPv4 和异常消失
+- 异常通知中心记录首次发生、持续状态和恢复事件；每类异常可关闭、仅在面板显示或同时推送 Telegram
+- Telegram Bot Token 加密传输、以 `0600` 权限保存在控制端且不会返回浏览器，支持测试消息和恢复通知
 - 启动、停止、重启和删除实例
 - 持久化记录节点接入和实例生命周期操作
 - 搜索实例并按运行状态过滤
@@ -90,7 +93,15 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 
 批量创建使用名称前缀、起始编号和补零位数生成实例名，例如 `vps-001` 至 `vps-010`。CPU 由 Incus 共享调度，单台配置不能超过宿主机物理核心数；批量上限由剩余内存、default 存储池空间和 SSH 端口数量的最小值决定。服务端会在开始批量任务前重新计算容量，任务中途失败时会尝试清理本批已经创建的实例。
 
-操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，实例 SSH 凭据保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/users.json`。再次运行控制端安装命令会原地升级并保留现有账号、用户授权、证书、节点连接、凭据和操作日志。
+操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，实例 SSH 凭据保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，两者权限均为 `0600`。再次运行控制端安装命令会原地升级并保留这些数据。
+
+## Telegram 通知
+
+1. 在 Telegram 的 `@BotFather` 创建机器人并取得 Bot Token。
+2. 先向机器人发送一条消息，再通过 `https://api.telegram.org/bot<TOKEN>/getUpdates` 查看 `chat.id`；群组和频道通常是负数 ID，频道也可填写 `@channel`。
+3. 在面板“异常通知”页面填写 Token 和 Chat ID，启用 Telegram 后点击“发送测试”。
+
+控制端需要能够通过 HTTPS 访问 `api.telegram.org:443`。同一异常只在首次出现时发送一次；异常持续期间不会重复刷屏，恢复后按配置发送一条恢复消息。
 
 ## 卸载
 
