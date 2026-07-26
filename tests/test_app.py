@@ -612,6 +612,13 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("const iconSvg=", app.HTML)
         self.assertNotIn("lucide.createIcons", app.HTML)
 
+    def test_instance_actions_are_labeled_and_show_pending_state(self):
+        for label in (">SSH</span>", ">流量</span>", "'开机中'", "'关机中'", "'重启中'"):
+            self.assertIn(label, app.HTML)
+        self.assertIn("pendingInstanceActions", app.HTML)
+        self.assertIn("instance-action-spin", app.HTML)
+        self.assertIn("prefers-reduced-motion:reduce", app.HTML)
+
     def test_csp_allows_same_origin_scripts(self):
         with open(app.__file__, encoding="utf-8") as source_file:
             source = source_file.read()
