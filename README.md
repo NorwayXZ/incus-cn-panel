@@ -41,6 +41,7 @@
 - 启动、停止、重启和删除实例
 - 持久化记录节点接入和实例生命周期操作
 - 搜索实例并按运行状态过滤
+- 在侧边栏检查当前与 GitHub 最新版本，并由管理员一键更新控制面板
 - 控制端与计算节点分别一键安装、一键卸载
 
 ## 设计原则
@@ -95,9 +96,13 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 
 批量创建使用名称前缀、起始编号和补零位数生成实例名，例如 `vps-001` 至 `vps-010`。CPU 由 Incus 共享调度，单台配置不能超过宿主机物理核心数；批量上限由剩余内存、default 存储池空间和 SSH 端口数量的最小值决定。服务端会在开始批量任务前重新计算容量，任务中途失败时会尝试清理本批已经创建的实例。
 
-操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，实例 SSH 凭据保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，这些文件权限均为 `0600`。再次运行控制端安装命令会原地升级并保留这些数据。
+操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，实例 SSH 凭据保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在权限为 `0600` 的 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`，这些文件权限均为 `0600`。再次运行控制端安装命令会原地升级并保留这些数据。
 
 月流量按实例所有非回环网卡的接收与发送字节合计计算。计数器每分钟持久化一次，实例或控制端重启后会继续累计；因此超额处置最多存在一个巡检周期的流量偏差。自动停止模式下，超额实例在提高配额、重置本月用量或进入下一个自然月前不能从面板重新启动。
+
+## 版本更新
+
+管理员可以从侧边栏打开“版本更新”，检查 GitHub `main` 分支中的 `VERSION`，有新版时点击“一键更新”。面板通过独立的 systemd 临时任务下载安装，保留现有账号、证书、节点信任和业务数据；安装完成后面板服务会重启，需要重新登录。升级失败时旧面板继续运行，失败状态记录在 `/var/lib/incus-cn-panel/update-status.json`，详细安装输出仅保存在 root 可读的 `/var/lib/incus-cn-panel/update.log`。
 
 ## Telegram 通知
 

@@ -80,9 +80,12 @@ install -d -m 0700 "$CONFIG_DIR/incus-client"
 install -d -m 0700 "$DATA_DIR"
 install -d -m 0700 "$DATA_DIR/cache"
 install -m 0755 "$SCRIPT_DIR/app.py" "$APP_DIR/app.py"
+install -m 0644 "$SCRIPT_DIR/VERSION" "$APP_DIR/VERSION"
 install -m 0644 "$SCRIPT_DIR/static/index.html" "$APP_DIR/static/index.html"
 install -m 0644 "$SCRIPT_DIR/static/lucide.min.js" "$APP_DIR/static/lucide.min.js"
 install -m 0755 "$SCRIPT_DIR/uninstall.sh" /usr/local/sbin/incus-cn-panel-uninstall
+install -m 0755 "$SCRIPT_DIR/bootstrap.sh" /usr/local/sbin/incus-cn-panel-bootstrap
+install -m 0755 "$SCRIPT_DIR/update.sh" /usr/local/sbin/incus-cn-panel-update
 install -m 0644 "$SCRIPT_DIR/incus-cn-panel.service" /etc/systemd/system/incus-cn-panel.service
 
 if [[ -f "$CONFIG_DIR/config.env" && -f /root/incus-cn-panel-credentials.txt && -z ${PANEL_PASSWORD:-} && -z $PANEL_PORT_WAS_SET && -z $PANEL_USER_WAS_SET ]]; then

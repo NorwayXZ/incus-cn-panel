@@ -21,6 +21,104 @@ import app  # noqa: E402
 
 
 class ValidationTests(unittest.TestCase):
+    def test_panel_version_and_remote_update_check(self):
+        self.assertEqual(app.APP_VERSION, "1.1.0")
+        self.assertLess(app.version_tuple("1.1.0"), app.version_tuple("1.2.0"))
+        response = mock.MagicMock()
+        response.read.return_value = b"1.2.0\n"
+        response.__enter__.return_value = response
+        with mock.patch("app.urlopen", return_value=response) as urlopen:
+            self.assertEqual(app.fetch_latest_version(), "1.2.0")
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
+        self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
+
+        response.read.return_value = b"not-a-version\n"
+        with mock.patch("app.urlopen", return_value=response), self.assertRaises(RuntimeError):
+            app.fetch_latest_version()
+
+        with mock.patch("app.read_update_status", return_value={
+            "status": "running", "target_version": "1.2.0",
+        }):
+            payload = app.panel_version_payload(refresh=False)
+        self.assertEqual(payload["latest_version"], "1.2.0")
+        self.assertTrue(payload["update_available"])
+
+    def test_panel_update_starts_fixed_systemd_updater(self):
+        old_values = (app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                updater = os.path.join(directory, "incus-cn-panel-update")
+                with open(updater, "w", encoding="utf-8") as handle:
+                    handle.write("#!/bin/sh\nexit 0\n")
+                os.chmod(updater, 0o700)
+                app.DATA_DIR = directory
+                app.UPDATE_STATUS_FILE = os.path.join(directory, "update-status.json")
+                app.UPDATER_PATH = updater
+                completed = mock.Mock(returncode=0, stdout="", stderr="")
+                with mock.patch("app.subprocess.run", return_value=completed) as run:
+                    status = app.start_panel_update("1.2.0")
+                self.assertEqual(status["status"], "queued")
+                command = run.call_args.args[0]
+                self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
+                self.assertEqual(command[-1], updater)
+                self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
+                with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
+                    saved = json.load(handle)
+                self.assertEqual(saved["target_version"], "1.2.0")
+        finally:
+            app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
+
+    def test_admin_can_check_and_start_panel_update(self):
+        app.SESSIONS["admin-token"] = {
+            "username": "admin", "role": "admin", "csrf": "csrf-token",
+            "expires": 9999999999,
+        }
+        server = app.PanelServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def request(method, path, payload=None):
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_address[1], timeout=5,
+            )
+            headers = {
+                "Cookie": "incus_cn_session=admin-token",
+                "X-CSRF-Token": "csrf-token",
+            }
+            body = None
+            if payload is not None:
+                body = json.dumps(payload)
+                headers["Content-Type"] = "application/json"
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            data = json.loads(response.read())
+            connection.close()
+            return response.status, data
+
+        try:
+            version_payload = {
+                "current_version": "1.1.0", "latest_version": "1.2.0",
+                "update_available": True, "update": {"status": "idle"},
+            }
+            queued = {"status": "queued", "target_version": "1.2.0"}
+            with mock.patch.object(app.Handler, "log_message", return_value=None), \
+                 mock.patch("app.panel_version_payload", return_value=version_payload), \
+                 mock.patch("app.fetch_latest_version", return_value="1.2.0"), \
+                 mock.patch("app.start_panel_update", return_value=queued), \
+                 mock.patch("app.record_operation") as record_operation:
+                status, data = request("GET", "/api/system/version?refresh=1")
+                self.assertEqual(status, 200)
+                self.assertTrue(data["update_available"])
+                status, data = request("POST", "/api/system/update", {})
+                self.assertEqual(status, 202)
+                self.assertEqual(data["update"], queued)
+                record_operation.assert_called_once()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            app.SESSIONS.clear()
+
     def test_run_incus_uses_writable_panel_cache(self):
         old_data_dir = app.DATA_DIR
         try:
@@ -47,6 +145,16 @@ class ValidationTests(unittest.TestCase):
             source.index("/usr/local/sbin/incus-cn-node-uninstall"),
             source.index("apt-get update"),
         )
+
+    def test_control_installer_includes_version_updater(self):
+        root = os.path.dirname(app.__file__)
+        with open(os.path.join(root, "install.sh"), encoding="utf-8") as source_file:
+            installer = source_file.read()
+        with open(os.path.join(root, "uninstall.sh"), encoding="utf-8") as source_file:
+            uninstaller = source_file.read()
+        for value in ("VERSION", "incus-cn-panel-bootstrap", "incus-cn-panel-update"):
+            self.assertIn(value, installer)
+        self.assertIn("incus-cn-panel-update", uninstaller)
 
     def test_node_uninstaller_checks_and_removes_known_residuals(self):
         uninstaller = os.path.join(os.path.dirname(app.__file__), "uninstall-node.sh")
@@ -554,7 +662,9 @@ class ValidationTests(unittest.TestCase):
                     run_incus.side_effect = [json.dumps({"config": {}}), None]
                     self.assertEqual(request("GET", "/api/users")[0], 403)
                     self.assertEqual(request("GET", "/api/notifications")[0], 403)
+                    self.assertEqual(request("GET", "/api/system/version?refresh=1")[0], 403)
                     self.assertEqual(request("POST", "/api/instances", {})[0], 403)
+                    self.assertEqual(request("POST", "/api/system/update", {})[0], 403)
                     self.assertEqual(request("POST", "/api/notifications/scan", {})[0], 403)
                     self.assertEqual(request(
                         "POST", "/api/nodes/node-a/instances/web-01/traffic", {},
@@ -607,6 +717,11 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("String(Math.round(Number($('managedTrafficValue').value)*multiplier))", app.HTML)
         self.assertIn('data-traffic-instance=', app.HTML)
         self.assertIn('data-view="operations"', app.HTML)
+        self.assertIn('data-view="updates"', app.HTML)
+        self.assertIn('id="checkUpdate"', app.HTML)
+        self.assertIn('id="startUpdate"', app.HTML)
+        self.assertIn("/api/system/version", app.HTML)
+        self.assertIn("/api/system/update", app.HTML)
         self.assertIn("location.pathname", app.HTML)
         self.assertIn("apiBase+path", app.HTML)
         self.assertIn("const iconSvg=", app.HTML)

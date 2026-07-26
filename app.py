@@ -13,11 +13,11 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -38,6 +38,14 @@ NOTIFICATION_CONFIG_FILE = os.path.join(DATA_DIR, "notification-config.json")
 NOTIFICATIONS_FILE = os.path.join(DATA_DIR, "notifications.json")
 TRAFFIC_FILE = os.path.join(DATA_DIR, "traffic-usage.json")
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+UPDATE_STATUS_FILE = os.path.join(DATA_DIR, "update-status.json")
+UPDATER_PATH = os.environ.get("PANEL_UPDATER_PATH", "/usr/local/sbin/incus-cn-panel-update")
+UPDATE_VERSION_URL = os.environ.get(
+    "PANEL_UPDATE_VERSION_URL",
+    "https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/VERSION",
+)
+UPDATE_REPOSITORY_URL = "https://github.com/NorwayXZ/incus-cn-panel"
 SESSIONS = {}
 LOGIN_ATTEMPTS = {}
 REMOTE_CONFIG_LOCK = threading.Lock()
@@ -47,6 +55,7 @@ CREDENTIALS_LOCK = threading.Lock()
 USERS_LOCK = threading.Lock()
 NOTIFICATION_LOCK = threading.RLock()
 TRAFFIC_LOCK = threading.RLock()
+UPDATE_LOCK = threading.RLock()
 MONITOR_SCAN_LOCK = threading.Lock()
 MONITOR_WAKE_EVENT = threading.Event()
 SESSION_TTL = 12 * 60 * 60
@@ -67,8 +76,23 @@ MAX_USER_ASSIGNMENTS = 500
 MAX_JSON_BODY_BYTES = 128 * 1024
 MAX_NOTIFICATION_EVENTS = 500
 MAX_TRAFFIC_LIMIT_BYTES = 1024**5
+VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 PANEL_TIMEZONE = ZoneInfo(os.environ.get("PANEL_TIMEZONE", "Asia/Shanghai"))
 MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", str(8 * 1024**3)))
+
+
+def read_panel_version(path=VERSION_FILE):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            version = handle.read(64).strip()
+    except OSError:
+        return "0.0.0"
+    return version if VERSION_RE.fullmatch(version) else "0.0.0"
+
+
+APP_VERSION = read_panel_version()
+
+
 RESOURCE_PROFILES = {
     "alpine": {
         "container": {"minimum_memory": "128MiB", "minimum_disk": "1GiB", "recommended_memory": "256MiB", "recommended_disk": "2GiB"},
@@ -1022,6 +1046,118 @@ def _write_private_json(path, data):
         except FileNotFoundError:
             pass
         raise
+
+
+def version_tuple(value):
+    value = str(value).strip()
+    if not VERSION_RE.fullmatch(value):
+        raise ValueError("版本号格式无效")
+    return tuple(int(part) for part in value.split("."))
+
+
+def default_update_status():
+    return {
+        "status": "idle",
+        "message": "尚未执行面板更新",
+        "current_version": APP_VERSION,
+        "target_version": "",
+        "updated_at": "",
+    }
+
+
+def read_update_status():
+    with UPDATE_LOCK:
+        saved = _read_private_json(UPDATE_STATUS_FILE, default_update_status())
+    status = default_update_status()
+    if saved.get("status") in {"idle", "queued", "running", "complete", "failed"}:
+        status["status"] = saved["status"]
+    for key in ("message", "current_version", "target_version", "updated_at", "unit"):
+        if key in saved:
+            status[key] = str(saved.get(key, ""))[:256]
+    return status
+
+
+def fetch_latest_version():
+    request = Request(
+        UPDATE_VERSION_URL,
+        headers={"Accept": "text/plain", "User-Agent": f"IncusCNPanel/{APP_VERSION}"},
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            version = response.read(64).decode("utf-8").strip()
+    except (HTTPError, URLError, OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"无法连接 GitHub 检查版本: {exc}") from exc
+    if not VERSION_RE.fullmatch(version):
+        raise RuntimeError("GitHub 返回的版本号格式无效")
+    return version
+
+
+def panel_version_payload(refresh=False):
+    update = read_update_status()
+    target = update.get("target_version", "")
+    latest = target if VERSION_RE.fullmatch(target) else APP_VERSION
+    checked_at = ""
+    if refresh:
+        latest = fetch_latest_version()
+        checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return {
+        "current_version": APP_VERSION,
+        "latest_version": latest,
+        "update_available": version_tuple(latest) > version_tuple(APP_VERSION),
+        "checked_at": checked_at,
+        "repository_url": UPDATE_REPOSITORY_URL,
+        "update": update,
+    }
+
+
+def _recent_update_in_progress(status):
+    if status.get("status") not in {"queued", "running"}:
+        return False
+    try:
+        updated_at = datetime.fromisoformat(status.get("updated_at", "").replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc) < timedelta(minutes=30)
+
+
+def start_panel_update(target_version):
+    if version_tuple(target_version) <= version_tuple(APP_VERSION):
+        raise ValueError("当前已经是最新版本")
+    if not os.path.isfile(UPDATER_PATH) or not os.access(UPDATER_PATH, os.X_OK):
+        raise RuntimeError("升级程序未安装，请先手动运行一次 bootstrap.sh")
+    with UPDATE_LOCK:
+        current = read_update_status()
+        if _recent_update_in_progress(current):
+            raise ValueError("已有版本更新任务正在执行")
+        unit = f"incus-cn-panel-update-{int(time.time())}"
+        queued = {
+            "status": "queued",
+            "message": "升级任务已提交，正在等待 systemd 执行",
+            "current_version": APP_VERSION,
+            "target_version": target_version,
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "unit": unit,
+        }
+        _write_private_json(UPDATE_STATUS_FILE, queued)
+        result = subprocess.run(
+            [
+                "systemd-run", "--quiet", "--collect", f"--unit={unit}",
+                UPDATER_PATH,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "systemd 无法启动升级任务").strip()
+            queued.update({
+                "status": "failed",
+                "message": message[:256],
+                "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            })
+            _write_private_json(UPDATE_STATUS_FILE, queued)
+            raise RuntimeError(f"无法启动升级任务: {message}")
+        return queued
 
 
 def traffic_period(now=None):
@@ -2254,7 +2390,7 @@ class PanelServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "IncusCNPanel/1.0"
+    server_version = f"IncusCNPanel/{APP_VERSION}"
 
     def setup(self):
         super().setup()
@@ -2385,7 +2521,8 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
         if path == "/":
             self.send_html()
             return
@@ -2399,6 +2536,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = overview_for_session(auth[1])
                 payload["csrf"] = auth[1]["csrf"]
+                payload["panel_version"] = APP_VERSION
+                payload["panel_update"] = read_update_status()
                 self.send_json(200, payload)
             except Exception as exc:
                 self.send_json(500, {"error": str(exc)})
@@ -2414,6 +2553,16 @@ class Handler(BaseHTTPRequestHandler):
             if not auth:
                 return
             self.send_json(200, {"notifications": notification_payload()})
+            return
+        if path == "/api/system/version":
+            auth = self.require_admin()
+            if not auth:
+                return
+            try:
+                refresh = parse_qs(parsed_url.query).get("refresh") == ["1"]
+                self.send_json(200, panel_version_payload(refresh=refresh))
+            except Exception as exc:
+                self.send_json(502, {"error": str(exc)})
             return
         images_match = re.fullmatch(r"/api/nodes/([^/]+)/images", path)
         if images_match:
@@ -2486,6 +2635,28 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/logout":
             SESSIONS.pop(auth[0], None)
             self.send_json(200, {"ok": True}, {"Set-Cookie": "incus_cn_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"})
+            return
+        if path == "/api/system/update":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                latest_version = fetch_latest_version()
+                update = start_panel_update(latest_version)
+                record_operation(
+                    "panel_update", latest_version,
+                    message=f"从 {APP_VERSION} 更新到 {latest_version}",
+                )
+                self.send_json(202, {
+                    "ok": True,
+                    "message": "升级任务已启动，完成后面板会自动重启",
+                    "update": update,
+                })
+            except ValueError as exc:
+                self.send_json(409, {"error": str(exc)})
+            except Exception as exc:
+                record_operation("panel_update", APP_VERSION, status="failed", message=str(exc))
+                self.send_json(500, {"error": str(exc)})
             return
         if path == "/api/notifications/config":
             if auth[1].get("role") != "admin":
