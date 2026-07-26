@@ -119,7 +119,7 @@
     .grid2,.grid3,.grid4 { display:grid; gap:16px 14px; align-items:start; }
     .grid2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .grid3 { grid-template-columns:repeat(3,minmax(0,1fr)); }
-    .grid4 { grid-template-columns:repeat(4,minmax(0,1fr)); }
+    .grid4 { grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
     .field { min-width:0; display:grid; align-content:start; gap:7px; }
     .field > label { min-height:21px; line-height:21px; }
     .input-unit { display:grid; grid-template-columns:1fr 92px; }
@@ -174,9 +174,10 @@
     .upload-progress { height:7px; margin-top:14px; overflow:hidden; background:#eaecf0; border-radius:3px; }
     .upload-progress span { display:block; width:0; height:100%; background:var(--blue); transition:width .15s; }
     .port-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px 14px; align-items:start; }
-    .batch-port-grid { grid-template-columns:repeat(4,minmax(0,1fr)); }
+    .batch-port-grid { grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); }
     #singlePortCustom,#batchPortCustom { display:contents; }
-    .capacity-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:1px; margin-top:14px; overflow:hidden; background:var(--line); border:1px solid var(--line); border-radius:6px; }
+    .capacity-strip { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:1px; margin-top:14px; overflow:hidden; background:var(--line); border:1px solid var(--line); border-radius:6px; }
+    .capacity-strip-four { grid-template-columns:repeat(4,minmax(0,1fr)); }
     .section-flow > .capacity-strip { margin:0; }
     .capacity-item { min-width:0; padding:11px 12px; background:#f9fafb; }
     .capacity-item span { display:block; color:var(--muted); font-size:11px; }
@@ -202,7 +203,10 @@
     .modal-foot { justify-content:flex-end; border:0; border-top:1px solid var(--line); }
     .close { width:34px; height:34px; display:grid; place-items:center; padding:0; color:#667085; background:transparent; border:0; }
     @media (max-width:1100px) { .metrics { grid-template-columns:1fr 1fr; } .dashboard-grid,.form-layout { grid-template-columns:1fr; } .summary { position:static; } .node-grid,.image-catalog { grid-template-columns:1fr 1fr; } }
-    @media (max-width:900px) { .grid3,.grid4,.port-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+    @media (max-width:900px) {
+      .grid3,.grid4,.port-grid,.capacity-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .capacity-strip:not(.capacity-strip-four) .capacity-item:last-child { grid-column:1 / -1; }
+    }
     @media (max-width:760px) {
       .login-shell { grid-template-columns:1fr; } .login-visual { display:none; } .login-panel { padding:32px 24px; }
       .topbar { height:56px; padding:0 13px; } .topbar .brand span:last-child { font-size:15px; } .connection { display:none; }
@@ -212,6 +216,7 @@
       .metrics { gap:9px; } .metric { min-height:112px; padding:14px; } .metric strong { font-size:22px; }
       .node-grid,.image-catalog { grid-template-columns:1fr; } .grid2,.grid3,.grid4,.port-grid,.access-grid,.capacity-strip { grid-template-columns:1fr; } .form-section { padding:17px 14px; }
       #singlePortCustom,#batchPortCustom { display:contents; }
+      .capacity-strip:not(.capacity-strip-four) .capacity-item:last-child { grid-column:auto; }
       .filters { align-items:stretch; flex-direction:column; } .filters input,.filters select { width:100%; }
       table { min-width:820px; } .dashboard-grid table { min-width:640px; }
     }
@@ -277,7 +282,7 @@
             <div class="step-title"><span class="step-number">2</span><div><strong>填写宿主机信息</strong><span>可以把脚本最后输出的两行内容完整粘贴到凭据框，地址会自动识别</span></div></div>
             <div class="grid3"><div class="field"><label for="nodeName">宿主机名称</label><input id="nodeName" pattern="[A-Za-z0-9][A-Za-z0-9-]{0,62}" placeholder="例如 node-hk-01" required></div><div class="field"><label for="nodeHost">服务器 IP 或域名</label><input id="nodeHost" placeholder="例如 203.0.113.10" required></div><div class="field"><label for="nodePort">Incus 服务端口</label><input id="nodePort" type="number" min="1" max="65535" value="8443" required></div></div>
             <div class="field"><label for="nodeToken">安装输出 / Trust Token</label><textarea id="nodeToken" spellcheck="false" placeholder="节点地址: https://203.0.113.10:8443&#10;Trust Token: ..." required></textarea></div>
-            <div class="capacity-strip"><div class="capacity-item"><span>实例网络</span><strong>incusbr0 · NAT</strong></div><div class="capacity-item"><span>存储池</span><strong>default</strong></div><div class="capacity-item"><span>连接方式</span><strong>双向 TLS</strong></div><div class="capacity-item"><span>宿主机密码</span><strong>不会保存</strong></div></div>
+            <div class="capacity-strip capacity-strip-four"><div class="capacity-item"><span>实例网络</span><strong>incusbr0 · NAT</strong></div><div class="capacity-item"><span>存储池</span><strong>default</strong></div><div class="capacity-item"><span>连接方式</span><strong>双向 TLS</strong></div><div class="capacity-item"><span>宿主机密码</span><strong>不会保存</strong></div></div>
             <div id="nodeError" class="error"></div>
             <div class="connect-actions"><button type="button" class="btn" data-go="nodes">取消</button><button type="submit" class="btn primary" id="nodeSubmit"><i data-lucide="shield-check"></i>验证并添加</button></div>
           </form>
