@@ -26,11 +26,15 @@ free_kb=$(df -Pk / | awk 'NR==2 {print $4}')
 memory_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
 (( memory_kb >= 1048576 )) || warn "内存少于 1 GiB，只适合极小型系统容器。"
 
+if [[ -f "$SCRIPT_DIR/uninstall-node.sh" ]]; then
+  install -m 0755 "$SCRIPT_DIR/uninstall-node.sh" /usr/local/sbin/incus-cn-node-uninstall
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates curl gnupg
 
-if ! command -v incus >/dev/null 2>&1; then
+if ! dpkg-query -W -f='${Status}' incus 2>/dev/null | grep -qx 'install ok installed'; then
   log "添加 Zabbly Incus 稳定版软件源"
   install -d -m 0755 /etc/apt/keyrings
   curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
@@ -100,10 +104,6 @@ if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; the
   else
     warn "UFW 已启用但未设置 CONTROLLER_IP，请手动放行控制端到 8443。"
   fi
-fi
-
-if [[ -f "$SCRIPT_DIR/uninstall-node.sh" ]]; then
-  install -m 0755 "$SCRIPT_DIR/uninstall-node.sh" /usr/local/sbin/incus-cn-node-uninstall
 fi
 
 token=$(incus --quiet config trust add "$TRUST_NAME")

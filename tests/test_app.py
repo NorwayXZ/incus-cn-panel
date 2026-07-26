@@ -37,6 +37,26 @@ class ValidationTests(unittest.TestCase):
         finally:
             app.DATA_DIR = old_data_dir
 
+    def test_node_installer_requires_incus_server_package(self):
+        installer = os.path.join(os.path.dirname(app.__file__), "install-node.sh")
+        with open(installer, encoding="utf-8") as source_file:
+            source = source_file.read()
+        self.assertIn("dpkg-query -W -f='${Status}' incus", source)
+        self.assertNotIn("if ! command -v incus", source)
+        self.assertLess(
+            source.index("/usr/local/sbin/incus-cn-node-uninstall"),
+            source.index("apt-get update"),
+        )
+
+    def test_node_uninstaller_checks_and_removes_known_residuals(self):
+        uninstaller = os.path.join(os.path.dirname(app.__file__), "uninstall-node.sh")
+        with open(uninstaller, encoding="utf-8") as source_file:
+            source = source_file.read()
+        self.assertIn("apt-get purge -y", source)
+        self.assertNotIn("apt-get purge -y incus incus-base incus-client 2>/dev/null || true", source)
+        for value in ("/root/.cache/incus", "incusbr0", "Incus controller", "residuals=()"):
+            self.assertIn(value, source)
+
     def test_instance_names(self):
         self.assertIsNotNone(app.NAME_RE.fullmatch("web-01"))
         self.assertIsNone(app.NAME_RE.fullmatch("-bad"))

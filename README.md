@@ -121,6 +121,14 @@ sudo incus-cn-panel-uninstall
 sudo incus-cn-node-uninstall
 ```
 
+如果节点安装中途失败、尚未生成上述卸载命令，可以直接下载同一份清理脚本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/uninstall-node.sh \
+  -o /tmp/uninstall-incus-node.sh
+sudo bash /tmp/uninstall-incus-node.sh
+```
+
 节点卸载会要求输入 `PURGE-NODE` 二次确认。该操作不可恢复。若只想断开节点，直接在面板点击“移除”，不要运行节点卸载命令。
 
 ## 边界
