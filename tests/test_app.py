@@ -1,9 +1,12 @@
 import hashlib
+import http.client
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 
@@ -75,6 +78,165 @@ class ValidationTests(unittest.TestCase):
             self.assertFalse(app.password_matches("wrong-password"))
         finally:
             app.PASSWORD_SALT, app.PASSWORD_HASH, app.PASSWORD_ITERATIONS = old_values
+
+    def test_user_accounts_are_private_authenticatable_and_disable_sessions(self):
+        old_values = (app.DATA_DIR, app.USERS_FILE)
+        app.SESSIONS.clear()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.USERS_FILE = os.path.join(directory, "users.json")
+                user = app.create_user_account("customer-01", "strong-password")
+                self.assertEqual(user["username"], "customer-01")
+                self.assertEqual(os.stat(app.USERS_FILE).st_mode & 0o777, 0o600)
+                self.assertEqual(
+                    app.authenticate_account("customer-01", "strong-password"),
+                    {"username": "customer-01", "role": "user"},
+                )
+                self.assertIsNone(app.authenticate_account("customer-01", "wrong-password"))
+                app.SESSIONS["customer-session"] = {
+                    "username": "customer-01", "role": "user",
+                    "csrf": "token", "expires": 9999999999,
+                }
+                app.update_user_account("customer-01", enabled=False)
+                self.assertNotIn("customer-session", app.SESSIONS)
+                self.assertIsNone(app.authenticate_account("customer-01", "strong-password"))
+        finally:
+            app.SESSIONS.clear()
+            app.DATA_DIR, app.USERS_FILE = old_values
+
+    def test_expiring_assignments_filter_user_overview_and_access(self):
+        old_values = (app.DATA_DIR, app.USERS_FILE)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.USERS_FILE = os.path.join(directory, "users.json")
+                app.create_user_account("customer-02", "strong-password")
+                future = (datetime.now(timezone.utc) + timedelta(days=31)).isoformat()
+                past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+                app.update_user_account("customer-02", assignments=[
+                    {"instance": "node-a/web-01", "expires_at": future},
+                    {"instance": "node-a/old-01", "expires_at": past},
+                ])
+                session = {"username": "customer-02", "role": "user"}
+                self.assertTrue(app.session_can_access_instance(session, "node-a", "web-01"))
+                self.assertFalse(app.session_can_access_instance(session, "node-a", "old-01"))
+                self.assertFalse(app.session_can_access_instance(session, "node-a", "other-01"))
+                nodes = [{
+                    "name": "node-a", "address": "https://203.0.113.10:8443",
+                    "status": "online", "memory": 1024, "private": "not-returned",
+                }]
+                instances = [
+                    {"node": "node-a", "name": "web-01"},
+                    {"node": "node-a", "name": "old-01"},
+                    {"node": "node-a", "name": "other-01"},
+                ]
+                with mock.patch("app.overview", return_value=(nodes, instances)):
+                    payload = app.overview_for_session(session)
+                self.assertEqual(payload["instances"], [{
+                    "node": "node-a",
+                    "name": "web-01",
+                    "authorization_expires_at": app.parse_assignment_expiry(future),
+                }])
+                self.assertEqual(payload["nodes"], [{
+                    "name": "node-a", "address": "https://203.0.113.10:8443",
+                    "status": "online",
+                }])
+                self.assertEqual(payload["operations"], [])
+                self.assertEqual(payload["public_images"], [])
+                app.remove_instance_assignments("node-a", "web-01")
+                self.assertFalse(app.session_can_access_instance(session, "node-a", "web-01"))
+        finally:
+            app.DATA_DIR, app.USERS_FILE = old_values
+
+    def test_assignment_expiry_requires_timezone(self):
+        with self.assertRaisesRegex(ValueError, "必须包含时区"):
+            app.parse_assignment_expiry("2026-08-01T00:00:00")
+
+    def test_http_permissions_enforce_active_instance_assignments(self):
+        old_values = (app.DATA_DIR, app.USERS_FILE)
+        app.SESSIONS.clear()
+        server = None
+        thread = None
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.USERS_FILE = os.path.join(directory, "users.json")
+                app.create_user_account("customer-03", "strong-password")
+                future = (datetime.now(timezone.utc) + timedelta(days=31)).isoformat()
+                app.update_user_account("customer-03", assignments=[
+                    {"instance": "node-a/web-01", "expires_at": future},
+                ])
+                app.SESSIONS["customer-token"] = {
+                    "username": "customer-03",
+                    "role": "user",
+                    "csrf": "csrf-token",
+                    "expires": 9999999999,
+                }
+
+                server = app.PanelServer(("127.0.0.1", 0), app.Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+
+                def request(method, path, payload=None):
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", server.server_address[1], timeout=5
+                    )
+                    headers = {
+                        "Cookie": "incus_cn_session=customer-token",
+                        "X-CSRF-Token": "csrf-token",
+                    }
+                    body = None
+                    if payload is not None:
+                        body = json.dumps(payload)
+                        headers["Content-Type"] = "application/json"
+                    connection.request(method, path, body=body, headers=headers)
+                    response = connection.getresponse()
+                    data = json.loads(response.read())
+                    connection.close()
+                    return response.status, data
+
+                with mock.patch.object(app.Handler, "log_message", return_value=None), \
+                     mock.patch("app.require_node", return_value="node-a"), \
+                     mock.patch("app.instance_credentials", return_value={"username": "root"}), \
+                     mock.patch("app.record_operation"), \
+                     mock.patch("app.run_incus") as run_incus:
+                    self.assertEqual(request("GET", "/api/users")[0], 403)
+                    self.assertEqual(request("POST", "/api/instances", {})[0], 403)
+                    self.assertEqual(request("DELETE", "/api/users/customer-03")[0], 403)
+                    status, data = request(
+                        "GET", "/api/nodes/node-a/instances/web-01/access"
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(data["access"], {"username": "root"})
+                    self.assertEqual(
+                        request("GET", "/api/nodes/node-a/instances/other-01/access")[0],
+                        403,
+                    )
+                    self.assertEqual(request(
+                        "POST",
+                        "/api/nodes/node-a/instances/web-01/action",
+                        {"action": "restart"},
+                    )[0], 200)
+                    run_incus.assert_called_once_with(
+                        "restart", "node-a:web-01", "--force", timeout=180
+                    )
+
+                    past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+                    app.update_user_account("customer-03", assignments=[
+                        {"instance": "node-a/web-01", "expires_at": past},
+                    ])
+                    self.assertEqual(request(
+                        "GET", "/api/nodes/node-a/instances/web-01/access"
+                    )[0], 403)
+        finally:
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if thread is not None:
+                thread.join(timeout=5)
+            app.SESSIONS.clear()
+            app.DATA_DIR, app.USERS_FILE = old_values
 
     def test_chinese_ui_and_relative_api_base(self):
         self.assertIn("Incus Control", app.HTML)

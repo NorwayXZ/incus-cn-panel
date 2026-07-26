@@ -30,6 +30,7 @@ TLS_KEY = os.environ.get("TLS_KEY", "/etc/incus-cn-panel/panel.key")
 DATA_DIR = os.environ.get("PANEL_DATA_DIR", "/var/lib/incus-cn-panel")
 OPERATIONS_FILE = os.path.join(DATA_DIR, "operations.jsonl")
 CREDENTIALS_FILE = os.path.join(DATA_DIR, "credentials.json")
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 SESSIONS = {}
 LOGIN_ATTEMPTS = {}
@@ -37,8 +38,10 @@ REMOTE_CONFIG_LOCK = threading.Lock()
 INSTANCE_MUTATION_LOCK = threading.RLock()
 OPERATION_LOCK = threading.Lock()
 CREDENTIALS_LOCK = threading.Lock()
+USERS_LOCK = threading.Lock()
 SESSION_TTL = 12 * 60 * 60
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
+USERNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,31}$")
 SIZE_RE = re.compile(r"^[1-9][0-9]*(MiB|GiB)$")
 SIZE_VALUE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([KMGTPE]?i?B)$", re.IGNORECASE)
 RATE_RE = re.compile(r"^[1-9][0-9]*(kbit|Mbit|Gbit)$")
@@ -49,6 +52,9 @@ SSH_PORT_MAX = 59999
 HOST_PORT_MIN = 1024
 HOST_PORT_MAX = 65535
 MAX_PORTS_PER_INSTANCE = 1000
+USER_PASSWORD_ITERATIONS = 260000
+MAX_USER_ASSIGNMENTS = 500
+MAX_JSON_BODY_BYTES = 128 * 1024
 MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", str(8 * 1024**3)))
 RESOURCE_PROFILES = {
     "alpine": {
@@ -107,6 +113,237 @@ def password_matches(password):
     else:
         candidate = hashlib.sha256(f"{PASSWORD_SALT}{password}".encode()).hexdigest()
     return hmac.compare_digest(candidate, PASSWORD_HASH)
+
+
+def _read_users_unlocked():
+    try:
+        with open(USERS_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"无法读取用户数据: {exc}") from exc
+    users = data.get("users", {}) if isinstance(data, dict) else {}
+    return users if isinstance(users, dict) else {}
+
+
+def _write_users_unlocked(users):
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    temporary = f"{USERS_FILE}.{os.getpid()}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "users": users}, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temporary, USERS_FILE)
+        os.chmod(USERS_FILE, 0o600)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _password_record(password):
+    if not 10 <= len(password) <= 128:
+        raise ValueError("密码长度必须在 10 到 128 个字符之间")
+    salt = secrets.token_hex(16)
+    password_hash = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), bytes.fromhex(salt), USER_PASSWORD_ITERATIONS
+    ).hex()
+    return {
+        "password_salt": salt,
+        "password_hash": password_hash,
+        "password_iterations": USER_PASSWORD_ITERATIONS,
+    }
+
+
+def parse_assignment_expiry(value):
+    text = str(value).strip()
+    try:
+        expires = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("授权到期时间无效") from exc
+    if expires.tzinfo is None:
+        raise ValueError("授权到期时间必须包含时区")
+    return expires.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def assignment_is_active(expires_at, now=None):
+    try:
+        expires = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires.tzinfo is None:
+        return False
+    return expires > (now or datetime.now(timezone.utc))
+
+
+def assignment_map(record):
+    assignments = record.get("assignments", {}) if isinstance(record, dict) else {}
+    return assignments if isinstance(assignments, dict) else {}
+
+
+def _public_user(username, record):
+    assignments = [
+        {
+            "instance": key,
+            "expires_at": str(expires_at),
+            "active": assignment_is_active(expires_at),
+        }
+        for key, expires_at in sorted(assignment_map(record).items())
+    ]
+    return {
+        "username": username,
+        "enabled": bool(record.get("enabled", True)),
+        "assignments": assignments,
+        "created_at": str(record.get("created_at", "")),
+    }
+
+
+def list_user_accounts():
+    with USERS_LOCK:
+        users = _read_users_unlocked()
+        return [_public_user(username, users[username]) for username in sorted(users)]
+
+
+def get_user_account(username):
+    with USERS_LOCK:
+        record = _read_users_unlocked().get(str(username).lower())
+        return dict(record) if isinstance(record, dict) else None
+
+
+def create_user_account(username, password):
+    username = str(username).strip().lower()
+    if not USERNAME_RE.fullmatch(username):
+        raise ValueError("用户名需为 3-32 位字母、数字、点、下划线或连字符")
+    if hmac.compare_digest(username.lower(), PANEL_USER.lower()):
+        raise ValueError("该用户名与管理员账号冲突")
+    record = {
+        **_password_record(str(password)),
+        "enabled": True,
+        "assignments": {},
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    with USERS_LOCK:
+        users = _read_users_unlocked()
+        if username in users:
+            raise ValueError("用户名已经存在")
+        users[username] = record
+        _write_users_unlocked(users)
+    return _public_user(username, record)
+
+
+def normalize_assignments(value):
+    if not isinstance(value, list) or len(value) > MAX_USER_ASSIGNMENTS:
+        raise ValueError(f"实例授权必须是列表且不能超过 {MAX_USER_ASSIGNMENTS} 项")
+    assignments = {}
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("实例授权格式无效")
+        key = str(item.get("instance", ""))
+        if "/" not in key:
+            raise ValueError("实例授权格式无效")
+        node, name = key.split("/", 1)
+        if not NAME_RE.fullmatch(node) or not NAME_RE.fullmatch(name):
+            raise ValueError("实例授权格式无效")
+        assignments[f"{node}/{name}"] = parse_assignment_expiry(item.get("expires_at", ""))
+    return assignments
+
+
+def invalidate_user_sessions(username):
+    for token, session in list(SESSIONS.items()):
+        if session.get("role") == "user" and session.get("username") == username:
+            SESSIONS.pop(token, None)
+
+
+def update_user_account(username, enabled=None, password=None, assignments=None):
+    username = str(username).lower()
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ValueError("账户状态无效")
+    with USERS_LOCK:
+        users = _read_users_unlocked()
+        record = users.get(username)
+        if not isinstance(record, dict):
+            raise ValueError("用户不存在")
+        if enabled is not None:
+            record["enabled"] = bool(enabled)
+        if password:
+            record.update(_password_record(str(password)))
+        if assignments is not None:
+            record["assignments"] = normalize_assignments(assignments)
+        users[username] = record
+        _write_users_unlocked(users)
+    if enabled is False or password:
+        invalidate_user_sessions(username)
+    return _public_user(username, record)
+
+
+def delete_user_account(username):
+    username = str(username).lower()
+    with USERS_LOCK:
+        users = _read_users_unlocked()
+        if username not in users:
+            raise ValueError("用户不存在")
+        users.pop(username)
+        _write_users_unlocked(users)
+    invalidate_user_sessions(username)
+
+
+def remove_instance_assignments(node, name=None):
+    prefix = f"{node}/"
+    key = f"{node}/{name}" if name is not None else ""
+    with USERS_LOCK:
+        users = _read_users_unlocked()
+        changed = False
+        for record in users.values():
+            assignments = assignment_map(record)
+            filtered = {
+                item: expires_at for item, expires_at in assignments.items()
+                if item != key
+            } if name is not None else {
+                item: expires_at for item, expires_at in assignments.items()
+                if not item.startswith(prefix)
+            }
+            if filtered != assignments:
+                record["assignments"] = filtered
+                changed = True
+        if changed:
+            _write_users_unlocked(users)
+
+
+def account_password_matches(record, password):
+    try:
+        candidate = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode(),
+            bytes.fromhex(str(record["password_salt"])),
+            int(record["password_iterations"]),
+        ).hex()
+        return hmac.compare_digest(candidate, str(record["password_hash"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def authenticate_account(username, password):
+    username = str(username).strip()
+    password = str(password)
+    if hmac.compare_digest(username, PANEL_USER) and password_matches(password):
+        return {"username": PANEL_USER, "role": "admin"}
+    normalized = username.lower()
+    record = get_user_account(normalized)
+    if record and bool(record.get("enabled", True)) and account_password_matches(record, password):
+        return {"username": normalized, "role": "user"}
+    return None
+
+
+def session_can_access_instance(session, node, name):
+    if session.get("role") == "admin":
+        return True
+    record = get_user_account(session.get("username", ""))
+    expires_at = assignment_map(record).get(f"{node}/{name}") if record else None
+    return bool(record and record.get("enabled", True) and assignment_is_active(expires_at))
 
 
 def clean_sessions():
@@ -611,6 +848,48 @@ def overview():
     return nodes, instances
 
 
+def overview_for_session(session):
+    nodes, instances = overview()
+    account = {"username": session["username"], "role": session["role"]}
+    if session["role"] == "admin":
+        return {
+            "account": account,
+            "nodes": nodes,
+            "instances": instances,
+            "public_images": public_image_catalog(),
+            "operations": recent_operations(),
+            "users": list_user_accounts(),
+        }
+    record = get_user_account(session["username"]) or {}
+    active = {
+        key: expires_at for key, expires_at in assignment_map(record).items()
+        if assignment_is_active(expires_at)
+    }
+    visible_instances = [
+        {
+            **instance,
+            "authorization_expires_at": active[f"{instance['node']}/{instance['name']}"],
+        }
+        for instance in instances
+        if f"{instance['node']}/{instance['name']}" in active
+    ]
+    visible_nodes = {
+        instance["node"] for instance in visible_instances
+    }
+    minimal_nodes = [
+        {"name": node["name"], "address": node["address"], "status": node["status"]}
+        for node in nodes if node["name"] in visible_nodes
+    ]
+    return {
+        "account": account,
+        "nodes": minimal_nodes,
+        "instances": visible_instances,
+        "public_images": [],
+        "operations": [],
+        "users": [],
+    }
+
+
 def occupied_host_ports(instances):
     occupied = set()
     for item in instances:
@@ -1048,7 +1327,7 @@ class PanelServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "IncusCNPanel/0.7"
+    server_version = "IncusCNPanel/0.8"
 
     def setup(self):
         super().setup()
@@ -1100,7 +1379,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_json(self):
         length = int(self.headers.get("Content-Length", "0"))
-        if length < 1 or length > 16384:
+        if length < 1 or length > MAX_JSON_BODY_BYTES:
             raise ValueError("请求内容长度无效")
         return json.loads(self.rfile.read(length))
 
@@ -1145,6 +1424,11 @@ class Handler(BaseHTTPRequestHandler):
         token = morsel.value
         data = SESSIONS.get(token)
         if data:
+            if data.get("role") == "user":
+                account = get_user_account(data.get("username", ""))
+                if not account or not account.get("enabled", True):
+                    SESSIONS.pop(token, None)
+                    return None, None
             data["expires"] = time.time() + SESSION_TTL
         return token, data
 
@@ -1157,6 +1441,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(403, {"error": "安全令牌无效，请刷新页面重试"})
             return None
         return token, session
+
+    def require_admin(self, csrf=False):
+        auth = self.require_auth(csrf=csrf)
+        if not auth:
+            return None
+        if auth[1].get("role") != "admin":
+            self.send_json(403, {"error": "需要管理员权限"})
+            return None
+        return auth
+
+    def require_instance_access(self, session, node, name):
+        if not session_can_access_instance(session, node, name):
+            self.send_json(403, {"error": "该实例未授权或授权已经到期"})
+            return False
+        return True
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -1171,20 +1470,21 @@ class Handler(BaseHTTPRequestHandler):
             if not auth:
                 return
             try:
-                nodes, instances = overview()
-                self.send_json(200, {
-                    "nodes": nodes,
-                    "instances": instances,
-                    "public_images": public_image_catalog(),
-                    "operations": recent_operations(),
-                    "csrf": auth[1]["csrf"],
-                })
+                payload = overview_for_session(auth[1])
+                payload["csrf"] = auth[1]["csrf"]
+                self.send_json(200, payload)
             except Exception as exc:
                 self.send_json(500, {"error": str(exc)})
             return
+        if path == "/api/users":
+            auth = self.require_admin()
+            if not auth:
+                return
+            self.send_json(200, {"users": list_user_accounts()})
+            return
         images_match = re.fullmatch(r"/api/nodes/([^/]+)/images", path)
         if images_match:
-            auth = self.require_auth()
+            auth = self.require_admin()
             if not auth:
                 return
             try:
@@ -1203,10 +1503,13 @@ class Handler(BaseHTTPRequestHandler):
             if not auth:
                 return
             try:
-                node = require_node(access_match.group(1))
+                requested_node = access_match.group(1)
                 name = access_match.group(2)
-                if not NAME_RE.fullmatch(name):
+                if not NAME_RE.fullmatch(requested_node) or not NAME_RE.fullmatch(name):
                     raise ValueError("实例名称无效")
+                if not self.require_instance_access(auth[1], requested_node, name):
+                    return
+                node = require_node(requested_node)
                 self.send_json(200, {"access": instance_credentials(node, name)})
             except Exception as exc:
                 self.send_json(404, {"error": str(exc)})
@@ -1227,16 +1530,21 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self.send_json(400, {"error": "请求格式无效"})
                 return
-            if not hmac.compare_digest(str(data.get("username", "")), PANEL_USER) or not password_matches(str(data.get("password", ""))):
+            account = authenticate_account(data.get("username", ""), data.get("password", ""))
+            if not account:
                 attempts.append(time.time())
                 self.send_json(401, {"error": "用户名或密码错误"})
                 return
             LOGIN_ATTEMPTS.pop(ip, None)
             token = secrets.token_urlsafe(32)
             csrf_token = secrets.token_urlsafe(24)
-            SESSIONS[token] = {"csrf": csrf_token, "expires": time.time() + SESSION_TTL}
+            SESSIONS[token] = {
+                **account,
+                "csrf": csrf_token,
+                "expires": time.time() + SESSION_TTL,
+            }
             cookie = f"incus_cn_session={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={SESSION_TTL}"
-            self.send_json(200, {"ok": True, "csrf": csrf_token}, {"Set-Cookie": cookie})
+            self.send_json(200, {"ok": True, "csrf": csrf_token, "account": account}, {"Set-Cookie": cookie})
             return
 
         auth = self.require_auth(csrf=True)
@@ -1246,7 +1554,40 @@ class Handler(BaseHTTPRequestHandler):
             SESSIONS.pop(auth[0], None)
             self.send_json(200, {"ok": True}, {"Set-Cookie": "incus_cn_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"})
             return
+        if path == "/api/users":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                data = self.read_json()
+                user = create_user_account(data.get("username", ""), str(data.get("password", "")))
+                record_operation("user_create", user["username"], message="创建普通账户")
+                self.send_json(201, {"ok": True, "user": user})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        user_match = re.fullmatch(r"/api/users/([a-zA-Z0-9][a-zA-Z0-9_.-]{2,31})", path)
+        if user_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            username = user_match.group(1).lower()
+            try:
+                data = self.read_json()
+                enabled = data.get("enabled") if "enabled" in data else None
+                assignments = data.get("assignments") if "assignments" in data else None
+                password = str(data.get("password", ""))
+                user = update_user_account(username, enabled, password, assignments)
+                active_count = sum(item["active"] for item in user["assignments"])
+                record_operation("user_update", username, message=f"有效授权 {active_count} 台实例")
+                self.send_json(200, {"ok": True, "user": user})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
         if path == "/api/nodes":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
             name = ""
             try:
                 data = self.read_json()
@@ -1269,6 +1610,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         copy_match = re.fullmatch(r"/api/nodes/([^/]+)/images/copy", path)
         if copy_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
             node = copy_match.group(1)
             image_id = ""
             try:
@@ -1287,6 +1631,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         upload_match = re.fullmatch(r"/api/nodes/([^/]+)/images/upload", path)
         if upload_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
             node = upload_match.group(1)
             alias = self.headers.get("X-Image-Alias", "").strip()
             filename = ""
@@ -1309,6 +1656,9 @@ class Handler(BaseHTTPRequestHandler):
                         pass
             return
         if path == "/api/instances":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
             node = ""
             name = ""
             try:
@@ -1326,6 +1676,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": str(exc)})
             return
         if path == "/api/instances/batch":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
             node = ""
             prefix = ""
             try:
@@ -1354,6 +1707,9 @@ class Handler(BaseHTTPRequestHandler):
 
         access_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/access", path)
         if access_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "只有管理员可以配置实例 SSH"})
+                return
             node = access_match.group(1)
             name = access_match.group(2)
             try:
@@ -1371,10 +1727,13 @@ class Handler(BaseHTTPRequestHandler):
             name = ""
             action = "action"
             try:
-                node = require_node(match.group(1))
+                requested_node = match.group(1)
                 name = match.group(2)
-                if not NAME_RE.fullmatch(name):
+                if not NAME_RE.fullmatch(requested_node) or not NAME_RE.fullmatch(name):
                     raise ValueError("实例名称无效")
+                if not self.require_instance_access(auth[1], requested_node, name):
+                    return
+                node = require_node(requested_node)
                 action = str(self.read_json().get("action", ""))
                 if action not in {"start", "stop", "restart"}:
                     raise ValueError("不支持的操作")
@@ -1395,8 +1754,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlparse(self.path).path
-        auth = self.require_auth(csrf=True)
+        auth = self.require_admin(csrf=True)
         if not auth:
+            return
+        user_match = re.fullmatch(r"/api/users/([a-zA-Z0-9][a-zA-Z0-9_.-]{2,31})", path)
+        if user_match:
+            username = user_match.group(1).lower()
+            try:
+                delete_user_account(username)
+                record_operation("user_delete", username, message="删除普通账户")
+                self.send_json(200, {"ok": True})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
             return
         image_match = re.fullmatch(r"/api/nodes/([^/]+)/images/([a-fA-F0-9]{12,64})", path)
         if image_match:
@@ -1417,6 +1786,7 @@ class Handler(BaseHTTPRequestHandler):
                 with REMOTE_CONFIG_LOCK:
                     run_incus("remote", "remove", node, timeout=20)
                 delete_credentials(node)
+                remove_instance_assignments(node)
                 record_operation("node_remove", node, node)
                 self.send_json(200, {"ok": True})
             except Exception as exc:
@@ -1432,6 +1802,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("实例名称无效")
                 run_incus("delete", f"{node}:{name}", "--force", timeout=180)
                 delete_credentials(node, name)
+                remove_instance_assignments(node, name)
                 record_operation("instance_delete", name, node)
                 self.send_json(200, {"ok": True})
             except Exception as exc:
