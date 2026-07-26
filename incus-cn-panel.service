@@ -13,7 +13,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=/etc/incus-cn-panel/incus-client
+ReadWritePaths=/etc/incus-cn-panel/incus-client /var/lib/incus-cn-panel
 
 [Install]
 WantedBy=multi-user.target

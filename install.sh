@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 APP_DIR=/opt/incus-cn-panel
 CONFIG_DIR=/etc/incus-cn-panel
+DATA_DIR=/var/lib/incus-cn-panel
 SERVICE_NAME=incus-cn-panel
 PANEL_PORT_WAS_SET=${PANEL_PORT+x}
 PANEL_USER_WAS_SET=${PANEL_USER+x}
@@ -73,9 +74,13 @@ fi
 
 log "安装中文管理面板"
 install -d -m 0755 "$APP_DIR"
+install -d -m 0755 "$APP_DIR/static"
 install -d -m 0700 "$CONFIG_DIR"
 install -d -m 0700 "$CONFIG_DIR/incus-client"
+install -d -m 0700 "$DATA_DIR"
 install -m 0755 "$SCRIPT_DIR/app.py" "$APP_DIR/app.py"
+install -m 0644 "$SCRIPT_DIR/static/index.html" "$APP_DIR/static/index.html"
+install -m 0644 "$SCRIPT_DIR/static/lucide.min.js" "$APP_DIR/static/lucide.min.js"
 install -m 0755 "$SCRIPT_DIR/uninstall.sh" /usr/local/sbin/incus-cn-panel-uninstall
 install -m 0644 "$SCRIPT_DIR/incus-cn-panel.service" /etc/systemd/system/incus-cn-panel.service
 
@@ -117,6 +122,7 @@ PANEL_PORT=${PANEL_PORT}
 TLS_CERT=${CONFIG_DIR}/panel.crt
 TLS_KEY=${CONFIG_DIR}/panel.key
 INCUS_CONF=${CONFIG_DIR}/incus-client
+PANEL_DATA_DIR=${DATA_DIR}
 EOF
   chmod 0600 "$CONFIG_DIR/config.env"
 
@@ -132,10 +138,14 @@ fi
 if ! grep -q '^INCUS_CONF=' "$CONFIG_DIR/config.env"; then
   printf 'INCUS_CONF=%s/incus-client\n' "$CONFIG_DIR" >> "$CONFIG_DIR/config.env"
 fi
+if ! grep -q '^PANEL_DATA_DIR=' "$CONFIG_DIR/config.env"; then
+  printf 'PANEL_DATA_DIR=%s\n' "$DATA_DIR" >> "$CONFIG_DIR/config.env"
+fi
 INCUS_CONF="$CONFIG_DIR/incus-client" incus remote list >/dev/null
 
 systemctl daemon-reload
-systemctl enable --now incus-cn-panel.service
+systemctl enable incus-cn-panel.service
+systemctl restart incus-cn-panel.service
 sleep 2
 systemctl is-active --quiet incus-cn-panel.service || {
   journalctl -u incus-cn-panel.service -n 50 --no-pager >&2

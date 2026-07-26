@@ -9,7 +9,7 @@ fi
 
 systemctl disable --now incus-cn-panel.service 2>/dev/null || true
 rm -f /etc/systemd/system/incus-cn-panel.service
-rm -rf /opt/incus-cn-panel /etc/incus-cn-panel
+rm -rf /opt/incus-cn-panel /etc/incus-cn-panel /var/lib/incus-cn-panel
 rm -f /root/incus-cn-panel-credentials.txt
 rm -f /usr/local/sbin/incus-cn-panel-uninstall
 systemctl daemon-reload
