@@ -46,6 +46,9 @@ IMAGE_ALIAS_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,127}$")
 FINGERPRINT_RE = re.compile(r"^[a-fA-F0-9]{12,64}$")
 SSH_PORT_MIN = 22000
 SSH_PORT_MAX = 59999
+HOST_PORT_MIN = 1024
+HOST_PORT_MAX = 65535
+MAX_PORTS_PER_INSTANCE = 1000
 MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", str(8 * 1024**3)))
 RESOURCE_PROFILES = {
     "alpine": {
@@ -294,6 +297,7 @@ def allocation_summary(instances, memory_total=0):
     disk = 0
     unlimited = 0
     ssh_ports = 0
+    forwarded_ports = 0
     for instance in instances:
         cpu_value = str(instance.get("cpu", ""))
         memory_value = str(instance.get("memory", ""))
@@ -312,12 +316,17 @@ def allocation_summary(instances, memory_total=0):
         disk += parse_size_bytes(disk_value)
         if str(instance.get("ssh_port", "")).isdigit():
             ssh_ports += 1
+        start = str(instance.get("port_start", ""))
+        end = str(instance.get("port_end", ""))
+        if start.isdigit() and end.isdigit() and int(start) <= int(end):
+            forwarded_ports += int(end) - int(start) + 1
     return {
         "cpu": cpu,
         "memory": memory,
         "disk": disk,
         "unlimited_instances": unlimited,
         "ssh_ports": ssh_ports,
+        "forwarded_ports": forwarded_ports,
     }
 
 
@@ -351,6 +360,8 @@ def parse_instances(node, raw):
             "disk": root_device.get("size", "不限"),
             "image": config.get("user.incus-cn-panel.image", "未知镜像"),
             "ssh_port": config.get("user.incus-cn-panel.ssh-port", ""),
+            "port_start": config.get("user.incus-cn-panel.port-start", ""),
+            "port_end": config.get("user.incus-cn-panel.port-end", ""),
         })
     return instances
 
@@ -518,6 +529,7 @@ def inspect_node(name, remote):
         except Exception:
             pass
         allocations = allocation_summary(instances, int(memory.get("total", 0)))
+        occupied_ports = occupied_host_ports(instances)
         memory_reserved = max(int(memory.get("used", 0)), allocations["memory"])
         disk_reserved = max(disk_used, allocations["disk"])
         load = resources.get("load") or {}
@@ -545,7 +557,11 @@ def inspect_node(name, remote):
             "available_cpu": int((resources.get("cpu") or {}).get("total", 0)),
             "available_memory": max(0, int(memory.get("total", 0)) - memory_reserved),
             "available_disk": max(0, disk_total - disk_reserved),
-            "available_ssh_ports": max(0, SSH_PORT_MAX - SSH_PORT_MIN + 1 - allocations["ssh_ports"]),
+            "available_ssh_ports": sum(
+                port not in occupied_ports
+                for port in range(SSH_PORT_MIN, SSH_PORT_MAX + 1)
+            ),
+            "forwarded_ports": allocations["forwarded_ports"],
             "unlimited_instances": allocations["unlimited_instances"],
             "load": float(load.get("Average1Min", 0)),
             "architecture": (resources.get("cpu") or {}).get("architecture", ""),
@@ -572,6 +588,7 @@ def inspect_node(name, remote):
             "available_memory": 0,
             "available_disk": 0,
             "available_ssh_ports": 0,
+            "forwarded_ports": 0,
             "unlimited_instances": 0,
             "load": 0,
             "architecture": "",
@@ -594,22 +611,62 @@ def overview():
     return nodes, instances
 
 
+def occupied_host_ports(instances):
+    occupied = set()
+    for item in instances:
+        config = item.get("config") or item.get("expanded_config") or item
+        ssh_port = str(config.get("user.incus-cn-panel.ssh-port", item.get("ssh_port", "")))
+        if ssh_port.isdigit():
+            occupied.add(int(ssh_port))
+        start = str(config.get("user.incus-cn-panel.port-start", item.get("port_start", "")))
+        end = str(config.get("user.incus-cn-panel.port-end", item.get("port_end", "")))
+        if start.isdigit() and end.isdigit() and HOST_PORT_MIN <= int(start) <= int(end) <= HOST_PORT_MAX:
+            occupied.update(range(int(start), int(end) + 1))
+    return occupied
+
+
 def port_is_used(node, port):
     raw_instances = json.loads(run_incus("list", f"{node}:", "--format=json", timeout=20))
-    expected = str(port)
-    return any(
-        (item.get("config") or {}).get("user.incus-cn-panel.ssh-port") == expected
-        for item in raw_instances
-    )
+    return int(port) in occupied_host_ports(raw_instances)
 
 
-def allocate_ssh_port(node):
+def validate_port_range(start, end):
+    if start == "" and end == "":
+        return None
+    if not str(start).isdigit() or not str(end).isdigit():
+        raise ValueError("业务端口段必须同时填写起始和结束端口")
+    start = int(start)
+    end = int(end)
+    if not HOST_PORT_MIN <= start <= end <= HOST_PORT_MAX:
+        raise ValueError(f"业务端口必须在 {HOST_PORT_MIN} 到 {HOST_PORT_MAX} 之间")
+    if end - start + 1 > MAX_PORTS_PER_INSTANCE:
+        raise ValueError(f"单台实例最多分配 {MAX_PORTS_PER_INSTANCE} 个业务端口")
+    return start, end
+
+
+def available_port_blocks(instances, pool_start, pool_end, ports_per_instance):
+    if not HOST_PORT_MIN <= pool_start <= pool_end <= HOST_PORT_MAX:
+        raise ValueError(f"端口池必须在 {HOST_PORT_MIN} 到 {HOST_PORT_MAX} 之间")
+    if not 1 <= ports_per_instance <= MAX_PORTS_PER_INSTANCE:
+        raise ValueError(f"每台业务端口数必须在 1 到 {MAX_PORTS_PER_INSTANCE} 之间")
+    occupied = occupied_host_ports(instances)
+    blocks = []
+    candidate = pool_start
+    while candidate + ports_per_instance - 1 <= pool_end:
+        block_end = candidate + ports_per_instance - 1
+        conflict = next((port for port in range(candidate, block_end + 1) if port in occupied), None)
+        if conflict is None:
+            blocks.append((candidate, block_end))
+            candidate = block_end + 1
+        else:
+            candidate = conflict + 1
+    return blocks
+
+
+def allocate_ssh_port(node, reserved=None):
     raw_instances = json.loads(run_incus("list", f"{node}:", "--format=json", timeout=20))
-    used = {
-        int(value)
-        for item in raw_instances
-        if (value := (item.get("config") or {}).get("user.incus-cn-panel.ssh-port", "")).isdigit()
-    }
+    used = occupied_host_ports(raw_instances)
+    used.update(reserved or ())
     for port in range(SSH_PORT_MIN, SSH_PORT_MAX + 1):
         if port not in used:
             return str(port)
@@ -723,6 +780,14 @@ def configure_instance_access(node, name):
                 "username": "root",
                 "password": password,
             }
+            port_start = str(config.get("user.incus-cn-panel.port-start", ""))
+            port_end = str(config.get("user.incus-cn-panel.port-end", ""))
+            if port_start.isdigit() and port_end.isdigit():
+                access.update({
+                    "port_start": int(port_start),
+                    "port_end": int(port_end),
+                    "port_count": int(port_end) - int(port_start) + 1,
+                })
             save_instance_credentials(node, name, access)
             return access
         except Exception:
@@ -758,6 +823,8 @@ def create_instance(data):
     read_iops = str(data.get("read_iops", "0"))
     write_iops = str(data.get("write_iops", "0"))
     ssh_port = str(data.get("ssh_port", "")).strip()
+    port_start = str(data.get("port_start", "")).strip()
+    port_end = str(data.get("port_end", "")).strip()
     if not NAME_RE.fullmatch(name):
         raise ValueError("名称只能包含字母、数字和连字符，最长 63 位")
     if kind not in {"container", "virtual-machine"}:
@@ -780,14 +847,24 @@ def create_instance(data):
         raise ValueError("IOPS 上限过大")
     if ssh_port and (not ssh_port.isdigit() or not 1024 <= int(ssh_port) <= 65535):
         raise ValueError("SSH 端口必须在 1024 到 65535 之间")
+    port_range = validate_port_range(port_start, port_end)
 
     ref = f"{node}:{name}"
     created = False
     with INSTANCE_MUTATION_LOCK:
         if ssh_port and port_is_used(node, ssh_port):
             raise ValueError("该节点上的 SSH 端口已被其他实例占用")
+        reserved_ports = set(range(port_range[0], port_range[1] + 1)) if port_range else set()
+        if ssh_port and int(ssh_port) in reserved_ports:
+            raise ValueError("SSH 端口不能与本实例业务端口段重叠")
+        if port_range:
+            raw_instances = json.loads(run_incus("list", f"{node}:", "--format=json", timeout=20))
+            occupied = occupied_host_ports(raw_instances)
+            conflict = next((port for port in reserved_ports if port in occupied), None)
+            if conflict is not None:
+                raise ValueError(f"业务端口 {conflict} 已被其他实例占用")
         if not ssh_port:
-            ssh_port = allocate_ssh_port(node)
+            ssh_port = allocate_ssh_port(node, reserved_ports)
         ssh_password = generate_ssh_password()
         init_args = ["init", resolved_image["reference"], ref]
         if kind == "virtual-machine":
@@ -799,6 +876,11 @@ def create_instance(data):
             "-c", f"user.incus-cn-panel.image={image}",
         ])
         init_args.extend(["-c", f"user.incus-cn-panel.ssh-port={ssh_port}"])
+        if port_range:
+            init_args.extend([
+                "-c", f"user.incus-cn-panel.port-start={port_range[0]}",
+                "-c", f"user.incus-cn-panel.port-end={port_range[1]}",
+            ])
         run_incus(*init_args, timeout=600)
         created = True
         try:
@@ -819,6 +901,12 @@ def create_instance(data):
                 "config", "device", "add", ref, "ssh", "proxy",
                 f"listen=tcp:0.0.0.0:{ssh_port}", "connect=tcp:127.0.0.1:22",
             )
+            if port_range:
+                run_incus(
+                    "config", "device", "add", ref, "ports", "proxy",
+                    f"listen=tcp:0.0.0.0:{port_range[0]}-{port_range[1]}",
+                    f"connect=tcp:127.0.0.1:{port_range[0]}-{port_range[1]}",
+                )
             run_incus("start", ref, timeout=180)
             provision_ssh(ref, ssh_password)
             access = {
@@ -828,6 +916,12 @@ def create_instance(data):
                 "username": "root",
                 "password": ssh_password,
             }
+            if port_range:
+                access.update({
+                    "port_start": port_range[0],
+                    "port_end": port_range[1],
+                    "port_count": port_range[1] - port_range[0] + 1,
+                })
             save_instance_credentials(node, name, access)
         except Exception:
             if created:
@@ -849,9 +943,25 @@ def maximum_instances(node_info, data):
         "disk": int(node_info.get("available_disk", 0)) // disk,
         "ssh_ports": int(node_info.get("available_ssh_ports", 0)),
     }
+    try:
+        ports_per_instance = int(data.get("port_count", 0) or 0)
+    except (TypeError, ValueError):
+        ports_per_instance = -1
+    if ports_per_instance:
+        try:
+            pool_start = int(data.get("port_pool_start", 0))
+            pool_end = int(data.get("port_pool_end", 0))
+            limits["forward_ports"] = len(available_port_blocks(
+                node_info.get("instances", []), pool_start, pool_end, ports_per_instance,
+            ))
+        except (TypeError, ValueError):
+            limits["forward_ports"] = 0
     if cpu > cpu_total:
         return 0, limits
-    return max(0, min(limits[key] for key in ("memory", "disk", "ssh_ports"))), limits
+    hard_limits = [limits[key] for key in ("memory", "disk", "ssh_ports")]
+    if "forward_ports" in limits:
+        hard_limits.append(limits["forward_ports"])
+    return max(0, min(hard_limits)), limits
 
 
 def live_node_info(node):
@@ -870,10 +980,13 @@ def create_batch_instances(data):
         start = int(data.get("start_index", 1))
         count = int(data.get("count", 0))
         padding = int(data.get("padding", 3))
+        port_count = int(data.get("port_count", 0) or 0)
     except (TypeError, ValueError) as exc:
         raise ValueError("批量编号参数无效") from exc
     if not 0 <= start <= 999999 or not 1 <= count <= 10000 or not 1 <= padding <= 6:
         raise ValueError("批量编号或数量无效")
+    if not 0 <= port_count <= MAX_PORTS_PER_INSTANCE:
+        raise ValueError(f"每台业务端口数必须在 0 到 {MAX_PORTS_PER_INSTANCE} 之间")
     names = [f"{prefix}{str(start + offset).zfill(padding)}" for offset in range(count)]
     if len(set(names)) != len(names) or any(not NAME_RE.fullmatch(name) for name in names):
         raise ValueError("批量实例名称无效，请调整前缀、编号或补零位数")
@@ -882,11 +995,22 @@ def create_batch_instances(data):
     batch_data["name"] = names[0]
     with INSTANCE_MUTATION_LOCK:
         node_info = live_node_info(node)
+        port_blocks = []
+        if port_count:
+            try:
+                pool_start = int(data.get("port_pool_start", 0))
+                pool_end = int(data.get("port_pool_end", 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("批量业务端口池无效") from exc
+            port_blocks = available_port_blocks(
+                node_info.get("instances", []), pool_start, pool_end, port_count,
+            )
         maximum, limits = maximum_instances(node_info, batch_data)
         if count > maximum:
             raise ValueError(
                 f"当前配置最多还能创建 {maximum} 台（内存 {limits.get('memory', 0)}、"
-                f"磁盘 {limits.get('disk', 0)}、端口 {limits.get('ssh_ports', 0)}；CPU 共享调度）"
+                f"磁盘 {limits.get('disk', 0)}、SSH {limits.get('ssh_ports', 0)}、"
+                f"业务端口 {limits.get('forward_ports', '未限制')}；CPU 共享调度）"
             )
         existing = {item["name"] for item in node_info.get("instances", [])}
         duplicate = next((name for name in names if name in existing), "")
@@ -894,9 +1018,11 @@ def create_batch_instances(data):
             raise ValueError(f"实例名称已存在: {duplicate}")
         created = []
         try:
-            for name in names:
+            for index, name in enumerate(names):
                 item_data = dict(batch_data)
                 item_data["name"] = name
+                if port_count:
+                    item_data["port_start"], item_data["port_end"] = port_blocks[index]
                 _, _, access = create_instance(item_data)
                 created.append({"name": name, "access": access})
         except Exception:
@@ -917,7 +1043,7 @@ with open(os.path.join(ASSET_DIR, "index.html"), encoding="utf-8") as html_file:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "IncusCNPanel/0.6"
+    server_version = "IncusCNPanel/0.7"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}", flush=True)

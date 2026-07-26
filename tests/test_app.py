@@ -163,6 +163,8 @@ class ValidationTests(unittest.TestCase):
                 "limits.memory": "256MiB",
                 "user.incus-cn-panel.image": "images:alpine/edge",
                 "user.incus-cn-panel.ssh-port": "22001",
+                "user.incus-cn-panel.port-start": "10000",
+                "user.incus-cn-panel.port-end": "10010",
             },
             "expanded_devices": {
                 "root": {"type": "disk", "path": "/", "size": "2GiB"},
@@ -173,6 +175,8 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(instances[0]["cpu_allowance"], "50%")
         self.assertEqual(instances[0]["ssh_port"], "22001")
         self.assertEqual(instances[0]["image"], "images:alpine/edge")
+        self.assertEqual(instances[0]["port_start"], "10000")
+        self.assertEqual(instances[0]["port_end"], "10010")
 
     def test_operation_log_is_persistent_and_newest_first(self):
         old_values = (app.DATA_DIR, app.OPERATIONS_FILE)
@@ -217,6 +221,26 @@ class ValidationTests(unittest.TestCase):
             {"config": {"user.incus-cn-panel.ssh-port": "22002"}},
         ])
         self.assertEqual(app.allocate_ssh_port("node-a"), "22001")
+
+    @mock.patch("app.run_incus")
+    def test_allocate_ssh_port_also_skips_business_range(self, run_incus):
+        run_incus.return_value = json.dumps([
+            {"config": {
+                "user.incus-cn-panel.port-start": "22000",
+                "user.incus-cn-panel.port-end": "22002",
+            }},
+            {"config": {"user.incus-cn-panel.ssh-port": "22004"}},
+        ])
+        self.assertEqual(app.allocate_ssh_port("node-a"), "22003")
+
+    def test_port_range_validation_and_conflict_aware_blocks(self):
+        self.assertEqual(app.validate_port_range("10000", "10010"), (10000, 10010))
+        with self.assertRaisesRegex(ValueError, "最多分配 1000"):
+            app.validate_port_range("10000", "11000")
+        blocks = app.available_port_blocks([
+            {"port_start": "10003", "port_end": "10005", "ssh_port": "10009"},
+        ], 10000, 10014, 3)
+        self.assertEqual(blocks, [(10000, 10002), (10006, 10008), (10010, 10012)])
 
     def test_public_catalog_includes_profiles_for_lxc_and_kvm(self):
         catalog = app.public_image_catalog()
@@ -290,6 +314,9 @@ class ValidationTests(unittest.TestCase):
             "guest_port": 22,
             "username": "root",
             "password": "generated-password",
+            "port_start": 10000,
+            "port_end": 10010,
+            "port_count": 11,
         }
         with (
             mock.patch("app.run_incus") as run_incus,
@@ -300,6 +327,7 @@ class ValidationTests(unittest.TestCase):
             mock.patch("app.node_host", return_value="203.0.113.10"),
             mock.patch("app.save_instance_credentials") as save_credentials,
         ):
+            run_incus.return_value = "[]"
             result = app.create_instance({
                 "node": "node-hk-01",
                 "name": "web-01",
@@ -314,6 +342,8 @@ class ValidationTests(unittest.TestCase):
                 "read_iops": "100",
                 "write_iops": "80",
                 "ssh_port": "22001",
+                "port_start": "10000",
+                "port_end": "10010",
             })
         self.assertEqual(result, ("node-hk-01", "web-01", access))
         port_is_used.assert_called_once_with("node-hk-01", "22001")
@@ -323,6 +353,14 @@ class ValidationTests(unittest.TestCase):
             mock.call(
                 "config", "device", "add", "node-hk-01:web-01", "ssh", "proxy",
                 "listen=tcp:0.0.0.0:22001", "connect=tcp:127.0.0.1:22",
+            ),
+            run_incus.call_args_list,
+        )
+        self.assertIn(
+            mock.call(
+                "config", "device", "add", "node-hk-01:web-01", "ports", "proxy",
+                "listen=tcp:0.0.0.0:10000-10010",
+                "connect=tcp:127.0.0.1:10000-10010",
             ),
             run_incus.call_args_list,
         )
@@ -380,13 +418,18 @@ class ValidationTests(unittest.TestCase):
             node, created = app.create_batch_instances({
                 "node": "node-a", "name_prefix": "vps-", "start_index": 7,
                 "padding": 3, "count": 2, "cpu": "1", "memory": "256MiB",
-                "disk": "2GiB",
+                "disk": "2GiB", "port_pool_start": "10000",
+                "port_pool_end": "10009", "port_count": "3",
             })
         self.assertEqual(node, "node-a")
         self.assertEqual([item["name"] for item in created], ["vps-007", "vps-008"])
         self.assertEqual(
             [call.args[0]["name"] for call in create_mock.call_args_list],
             ["vps-007", "vps-008"],
+        )
+        self.assertEqual(
+            [(call.args[0]["port_start"], call.args[0]["port_end"]) for call in create_mock.call_args_list],
+            [(10000, 10002), (10003, 10005)],
         )
 
         with (
