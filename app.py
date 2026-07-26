@@ -1885,9 +1885,19 @@ set_option() {
 }
 set_option PermitRootLogin yes
 set_option PasswordAuthentication yes
+if grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config; then
+    mkdir -p /etc/ssh/sshd_config.d
+    cat > /etc/ssh/sshd_config.d/00-incus-cn-panel.conf <<'EOF'
+PermitRootLogin yes
+PasswordAuthentication yes
+EOF
+fi
 printf 'root:%s\n' "$PANEL_SSH_PASSWORD" | chpasswd
+/usr/sbin/sshd -t
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl enable --now "$service_name"
+    systemctl enable "$service_name"
+    systemctl restart "$service_name"
+    systemctl is-active --quiet "$service_name"
 elif command -v rc-update >/dev/null 2>&1; then
     rc-update add "$service_name" default
     rc-service "$service_name" restart

@@ -57,6 +57,16 @@ class ValidationTests(unittest.TestCase):
         for value in ("/root/.cache/incus", "incusbr0", "Incus controller", "residuals=()"):
             self.assertIn(value, source)
 
+    @mock.patch("app.run_incus")
+    def test_ssh_provisioning_reloads_password_authentication(self, run_incus):
+        app.provision_ssh("node-a:web-01", "generated-password")
+        args = run_incus.call_args.args
+        script = args[-1]
+        self.assertIn("00-incus-cn-panel.conf", script)
+        self.assertIn("/usr/sbin/sshd -t", script)
+        self.assertIn('systemctl restart "$service_name"', script)
+        self.assertNotIn('systemctl enable --now "$service_name"', script)
+
     def test_instance_names(self):
         self.assertIsNotNone(app.NAME_RE.fullmatch("web-01"))
         self.assertIsNone(app.NAME_RE.fullmatch("-bad"))
