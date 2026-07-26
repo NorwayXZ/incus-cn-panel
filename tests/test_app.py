@@ -22,8 +22,8 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.6.0")
-        self.assertLess(app.version_tuple("1.6.0"), app.version_tuple("1.7.0"))
+        self.assertEqual(app.APP_VERSION, "1.6.1")
+        self.assertLess(app.version_tuple("1.6.1"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
         response.read.return_value = b"1.7.0\n"
         response.__enter__.return_value = response
@@ -111,6 +111,11 @@ class ValidationTests(unittest.TestCase):
                  mock.patch("app.fetch_latest_version", return_value="1.7.0"), \
                  mock.patch("app.start_panel_update", return_value=queued), \
                  mock.patch("app.record_operation") as record_operation:
+                status, data = request("GET", "/api/session")
+                self.assertEqual(status, 200)
+                self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
+                self.assertEqual(data["csrf"], "csrf-token")
+                self.assertEqual(data["panel_version"], "1.6.1")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -874,11 +879,16 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("Incus Control", app.HTML)
         self.assertIn('id="toggleLoginPassword"', app.HTML)
         self.assertIn('id="loginSubmit"', app.HTML)
+        self.assertIn('id="sessionGate"', app.HTML)
+        self.assertIn('id="loginSubmit" class="btn primary login-submit" type="button"', app.HTML)
         self.assertIn('id="loginErrorText"', app.HTML)
         self.assertNotIn('<div class="login-visual"', app.HTML)
         self.assertNotIn("assets/login-datacenter.webp", app.HTML)
         self.assertIn("function setLoginError", app.HTML)
         self.assertIn("正在登录", app.HTML)
+        self.assertIn("/api/session", app.HTML)
+        self.assertIn("restoreSession()", app.HTML)
+        self.assertNotIn("icons();load();", app.HTML)
         self.assertIn("切割实例", app.HTML)
         self.assertIn("添加宿主机", app.HTML)
         self.assertIn("月流量配额", app.HTML)

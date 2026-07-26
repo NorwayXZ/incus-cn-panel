@@ -2750,6 +2750,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/assets/login-datacenter.webp":
             self.send_asset("login-datacenter.webp", "image/webp")
             return
+        if path == "/api/session":
+            auth = self.require_auth()
+            if not auth:
+                return
+            session = auth[1]
+            self.send_json(200, {
+                "ok": True,
+                "csrf": session["csrf"],
+                "account": {
+                    "username": session["username"],
+                    "role": session["role"],
+                },
+                "panel_version": APP_VERSION,
+            })
+            return
         if path == "/api/overview":
             auth = self.require_auth()
             if not auth:
@@ -2856,7 +2871,12 @@ class Handler(BaseHTTPRequestHandler):
                 "expires": time.time() + SESSION_TTL,
             }
             cookie = f"incus_cn_session={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={SESSION_TTL}"
-            self.send_json(200, {"ok": True, "csrf": csrf_token, "account": account}, {"Set-Cookie": cookie})
+            self.send_json(200, {
+                "ok": True,
+                "csrf": csrf_token,
+                "account": account,
+                "panel_version": APP_VERSION,
+            }, {"Set-Cookie": cookie})
             return
 
         auth = self.require_auth(csrf=True)
