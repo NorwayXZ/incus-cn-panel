@@ -22,13 +22,13 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.2.0")
-        self.assertLess(app.version_tuple("1.2.0"), app.version_tuple("1.3.0"))
+        self.assertEqual(app.APP_VERSION, "1.3.0")
+        self.assertLess(app.version_tuple("1.3.0"), app.version_tuple("1.4.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"1.3.0\n"
+        response.read.return_value = b"1.4.0\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "1.3.0")
+            self.assertEqual(app.fetch_latest_version(), "1.4.0")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -37,10 +37,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "1.3.0",
+            "status": "running", "target_version": "1.4.0",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "1.3.0")
+        self.assertEqual(payload["latest_version"], "1.4.0")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -56,7 +56,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("1.3.0")
+                    status = app.start_panel_update("1.4.0")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -64,7 +64,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "1.3.0")
+                self.assertEqual(saved["target_version"], "1.4.0")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -97,18 +97,26 @@ class ValidationTests(unittest.TestCase):
 
         try:
             version_payload = {
-                "current_version": "1.2.0", "latest_version": "1.3.0",
+                "current_version": "1.3.0", "latest_version": "1.4.0",
                 "update_available": True, "update": {"status": "idle"},
             }
-            queued = {"status": "queued", "target_version": "1.3.0"}
+            queued = {"status": "queued", "target_version": "1.4.0"}
+            live_payload = {
+                "nodes": [{"name": "node-a", "sample_ready": True}],
+                "interval_seconds": 5,
+            }
             with mock.patch.object(app.Handler, "log_message", return_value=None), \
                  mock.patch("app.panel_version_payload", return_value=version_payload), \
-                 mock.patch("app.fetch_latest_version", return_value="1.2.0"), \
+                 mock.patch("app.node_live_payload", return_value=live_payload), \
+                 mock.patch("app.fetch_latest_version", return_value="1.4.0"), \
                  mock.patch("app.start_panel_update", return_value=queued), \
                  mock.patch("app.record_operation") as record_operation:
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
+                status, data = request("GET", "/api/nodes/live")
+                self.assertEqual(status, 200)
+                self.assertEqual(data, live_payload)
                 status, data = request("POST", "/api/system/update", {})
                 self.assertEqual(status, 202)
                 self.assertEqual(data["update"], queued)
@@ -793,6 +801,7 @@ class ValidationTests(unittest.TestCase):
                     self.assertEqual(request("GET", "/api/users")[0], 403)
                     self.assertEqual(request("GET", "/api/notifications")[0], 403)
                     self.assertEqual(request("GET", "/api/system/version?refresh=1")[0], 403)
+                    self.assertEqual(request("GET", "/api/nodes/live")[0], 403)
                     self.assertEqual(request("POST", "/api/instances", {})[0], 403)
                     self.assertEqual(request("POST", "/api/system/update", {})[0], 403)
                     self.assertEqual(request("POST", "/api/account/password", {})[0], 403)
@@ -856,6 +865,10 @@ class ValidationTests(unittest.TestCase):
         self.assertIn('id="openAdminAccount"', app.HTML)
         self.assertIn('id="adminAccountDialog"', app.HTML)
         self.assertIn("/api/account/password", app.HTML)
+        self.assertIn("/api/nodes/live", app.HTML)
+        for label in ("实例 CPU", "宿主机内存", "实例下载", "实例上传"):
+            self.assertIn(label, app.HTML)
+        self.assertIn("startNodeLivePolling", app.HTML)
         self.assertIn("location.pathname", app.HTML)
         self.assertIn("apiBase+path", app.HTML)
         self.assertIn("const iconSvg=", app.HTML)
@@ -980,6 +993,10 @@ class ValidationTests(unittest.TestCase):
                     "type": "loopback",
                     "counters": {"bytes_received": 9999, "bytes_sent": 9999},
                 },
+                "eth1": {
+                    "type": "broadcast",
+                    "counters": {"bytes_received": 800, "bytes_sent": 700},
+                },
             }},
         }])
         self.assertEqual(instances[0]["disk"], "2GiB")
@@ -992,8 +1009,62 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(instances[0]["cpu_usage_ns"], 0)
         self.assertEqual(instances[0]["traffic_limit_bytes"], 500 * 1024**3)
         self.assertEqual(instances[0]["traffic_action"], "stop")
-        self.assertEqual(instances[0]["network_rx_bytes"], 1200)
-        self.assertEqual(instances[0]["network_tx_bytes"], 300)
+        self.assertEqual(instances[0]["network_rx_bytes"], 2000)
+        self.assertEqual(instances[0]["network_tx_bytes"], 1000)
+
+    @mock.patch("app.run_incus")
+    def test_live_node_snapshot_aggregates_instance_counters(self, run_incus):
+        resources = {
+            "cpu": {"total": 2},
+            "memory": {"total": 2 * 1024**3, "used": 768 * 1024**2},
+            "load": {"Average1Min": 0.75},
+            "storage": {"disks": [{"size": 20 * 1024**3}]},
+        }
+        instances = [{
+            "name": "vps-01", "status": "Running",
+            "state": {
+                "cpu": {"usage": 4_000_000_000},
+                "network": {"eth0": {
+                    "type": "broadcast",
+                    "counters": {"bytes_received": 8_000_000, "bytes_sent": 3_000_000},
+                }},
+            },
+        }]
+        pool = {"space": {"total": 15 * 1024**3, "used": 5 * 1024**3}}
+        run_incus.side_effect = [json.dumps(resources), json.dumps(instances), json.dumps(pool)]
+
+        sample = app.inspect_node_live("node-a", {})
+
+        self.assertEqual(sample["status"], "online")
+        self.assertEqual(sample["cpu"], 2)
+        self.assertEqual(sample["load"], 0.75)
+        self.assertEqual(sample["memory_used"], 768 * 1024**2)
+        self.assertEqual(sample["disk"], 15 * 1024**3)
+        self.assertEqual(sample["disk_used"], 5 * 1024**3)
+        self.assertEqual(sample["instance_cpu_usage_ns"], 4_000_000_000)
+        self.assertEqual(sample["instance_network_rx_bytes"], 8_000_000)
+        self.assertEqual(sample["instance_network_tx_bytes"], 3_000_000)
+
+    def test_live_node_rates_use_counter_deltas_and_handle_resets(self):
+        previous = {
+            "status": "online", "instance_cpu_usage_ns": 10_000_000_000,
+            "instance_network_rx_bytes": 5_000_000,
+            "instance_network_tx_bytes": 2_000_000,
+        }
+        sample = {
+            "name": "node-a", "status": "online", "cpu": 2,
+            "instance_cpu_usage_ns": 11_000_000_000,
+            "instance_network_rx_bytes": 10_000_000,
+            "instance_network_tx_bytes": 4_500_000,
+        }
+        rates = app.node_live_rates(sample, previous, 5)
+        self.assertTrue(rates["sample_ready"])
+        self.assertAlmostEqual(rates["instance_cpu_percent"], 10.0)
+        self.assertAlmostEqual(rates["network_rx_bytes_per_second"], 1_000_000)
+        self.assertAlmostEqual(rates["network_tx_bytes_per_second"], 500_000)
+
+        reset = app.node_live_rates({**sample, "instance_network_rx_bytes": 1}, previous, 5)
+        self.assertFalse(reset["sample_ready"])
 
     def test_operation_log_is_persistent_and_newest_first(self):
         old_values = (app.DATA_DIR, app.OPERATIONS_FILE)

@@ -21,6 +21,7 @@
 - 中文响应式 Web 控制台，包含统计概览、宿主机、添加宿主机、切割实例、实例管理、镜像管理和操作日志
 - 使用 Trust Token 接入多个 Incus 计算节点
 - 显示节点在线状态、架构、负载、CPU、内存、物理磁盘和实例数量
+- 宿主机页面每 5 秒刷新内存、存储池、1 分钟负载，并按实例计数器显示实时 CPU 与上传/下载速率
 - 在指定节点单个或批量创建系统容器、虚拟机
 - 浏览 `images.linuxcontainers.org` 公共镜像目录，在宿主机预拉取、查看和删除缓存镜像
 - 将 Incus 统一镜像 tar 导入指定宿主机，并直接使用本地镜像创建实例
@@ -100,6 +101,8 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 批量创建使用名称前缀、起始编号和补零位数生成实例名，例如 `vps-001` 至 `vps-010`。CPU 由 Incus 共享调度，单台配置不能超过宿主机物理核心数；批量上限由剩余内存、default 存储池空间和 SSH 端口数量的最小值决定。服务端会在开始批量任务前重新计算容量，任务中途失败时会尝试清理本批已经创建的实例。
 
 操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，管理员密码哈希保存在 `/var/lib/incus-cn-panel/password.env`，实例 SSH 凭据保存在 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`，这些敏感文件权限均为 `0600`。再次运行控制端安装命令会原地升级并保留这些数据。
+
+宿主机实时监控只在管理员打开“宿主机”页面时查询，离开页面后自动停止。内存、存储池和 1 分钟负载来自 Incus 宿主机资源接口；“实例 CPU”“实例上传”“实例下载”由该宿主机上全部实例的累计计数器差分计算，不包含 Incus 服务、SSH 等宿主机系统进程自身的 CPU 与管理流量。
 
 月流量按实例所有非回环网卡的接收与发送字节合计计算。计数器每分钟持久化一次，实例或控制端重启后会继续累计；因此超额处置最多存在一个巡检周期的流量偏差。自动停止模式下，超额实例在提高配额、重置本月用量或进入下一个自然月前不能从面板重新启动。
 

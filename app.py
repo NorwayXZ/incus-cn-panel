@@ -60,6 +60,7 @@ NOTIFICATION_LOCK = threading.RLock()
 TRAFFIC_LOCK = threading.RLock()
 UPDATE_LOCK = threading.RLock()
 PASSWORD_CONFIG_LOCK = threading.Lock()
+NODE_LIVE_LOCK = threading.Lock()
 MONITOR_SCAN_LOCK = threading.Lock()
 MONITOR_WAKE_EVENT = threading.Event()
 SESSION_TTL = 12 * 60 * 60
@@ -83,6 +84,8 @@ MAX_TRAFFIC_LIMIT_BYTES = 1024**5
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 PANEL_TIMEZONE = ZoneInfo(os.environ.get("PANEL_TIMEZONE", "Asia/Shanghai"))
 MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", str(8 * 1024**3)))
+NODE_LIVE_SAMPLES = {}
+NODE_LIVE_INTERVAL_SECONDS = 5
 
 
 def read_panel_version(path=VERSION_FILE):
@@ -781,11 +784,9 @@ def parse_instances(node, raw):
                 network_rx_bytes += int(counters.get("bytes_received", 0) or 0)
                 network_tx_bytes += int(counters.get("bytes_sent", 0) or 0)
             for address in interface.get("addresses", []):
-                if address.get("family") == "inet" and address.get("scope") == "global":
+                if not ipv4 and address.get("family") == "inet" and address.get("scope") == "global":
                     ipv4 = address.get("address", "")
                     break
-            if ipv4:
-                break
         config = item.get("expanded_config") or item.get("config") or {}
         devices = item.get("expanded_devices") or item.get("devices") or {}
         root_device = next(
@@ -1053,6 +1054,139 @@ def inspect_node(name, remote):
             "images": [],
             "image_error": "",
             "error": str(exc),
+        }
+
+
+def inspect_node_live(name, remote):
+    try:
+        resources = json.loads(run_incus("query", f"{name}:/1.0/resources", timeout=15))
+        raw_instances = json.loads(run_incus("list", f"{name}:", "--format=json", timeout=20))
+        instances = parse_instances(name, raw_instances)
+        memory = resources.get("memory") or {}
+        load = resources.get("load") or {}
+        storage_disks = (resources.get("storage") or {}).get("disks") or []
+        disk_total = sum(
+            int(disk.get("size", 0))
+            for disk in storage_disks
+            if not disk.get("removable", False) and not disk.get("read_only", False)
+        )
+        disk_used = 0
+        try:
+            pool_resources = json.loads(
+                run_incus("query", f"{name}:/1.0/storage-pools/default/resources", timeout=15)
+            )
+            space = pool_resources.get("space") or {}
+            disk_total = int(space.get("total", 0)) or disk_total
+            disk_used = int(space.get("used", 0))
+        except Exception:
+            pass
+        return {
+            "name": name,
+            "status": "online",
+            "cpu": int((resources.get("cpu") or {}).get("total", 0)),
+            "load": float(load.get("Average1Min", 0)),
+            "memory": int(memory.get("total", 0)),
+            "memory_used": int(memory.get("used", 0)),
+            "disk": disk_total,
+            "disk_used": disk_used,
+            "instance_count": len(instances),
+            "instance_cpu_usage_ns": sum(
+                int(instance.get("cpu_usage_ns", 0) or 0) for instance in instances
+            ),
+            "instance_network_rx_bytes": sum(
+                int(instance.get("network_rx_bytes", 0) or 0) for instance in instances
+            ),
+            "instance_network_tx_bytes": sum(
+                int(instance.get("network_tx_bytes", 0) or 0) for instance in instances
+            ),
+            "error": "",
+        }
+    except Exception as exc:
+        return {
+            "name": name,
+            "status": "offline",
+            "cpu": 0,
+            "load": 0,
+            "memory": 0,
+            "memory_used": 0,
+            "disk": 0,
+            "disk_used": 0,
+            "instance_count": 0,
+            "instance_cpu_usage_ns": 0,
+            "instance_network_rx_bytes": 0,
+            "instance_network_tx_bytes": 0,
+            "error": str(exc),
+        }
+
+
+def node_live_rates(sample, previous, elapsed_seconds):
+    result = dict(sample)
+    result.update({
+        "sample_ready": False,
+        "instance_cpu_percent": 0.0,
+        "network_rx_bytes_per_second": 0.0,
+        "network_tx_bytes_per_second": 0.0,
+    })
+    if (
+        sample.get("status") != "online"
+        or not previous
+        or previous.get("status") != "online"
+        or elapsed_seconds < 0.5
+    ):
+        return result
+    counters = (
+        "instance_cpu_usage_ns",
+        "instance_network_rx_bytes",
+        "instance_network_tx_bytes",
+    )
+    if any(int(sample.get(key, 0)) < int(previous.get(key, 0)) for key in counters):
+        return result
+    cpu_cores = max(1, int(sample.get("cpu", 0) or 0))
+    cpu_delta = int(sample["instance_cpu_usage_ns"]) - int(previous["instance_cpu_usage_ns"])
+    result.update({
+        "sample_ready": True,
+        "instance_cpu_percent": min(
+            100.0, max(0.0, cpu_delta / 1_000_000_000 / elapsed_seconds / cpu_cores * 100)
+        ),
+        "network_rx_bytes_per_second": max(
+            0.0,
+            (int(sample["instance_network_rx_bytes"]) - int(previous["instance_network_rx_bytes"]))
+            / elapsed_seconds,
+        ),
+        "network_tx_bytes_per_second": max(
+            0.0,
+            (int(sample["instance_network_tx_bytes"]) - int(previous["instance_network_tx_bytes"]))
+            / elapsed_seconds,
+        ),
+    })
+    return result
+
+
+def node_live_payload():
+    with NODE_LIVE_LOCK:
+        remotes = registered_remotes()
+        started = time.monotonic()
+        if remotes:
+            with ThreadPoolExecutor(max_workers=min(8, len(remotes))) as executor:
+                samples = list(executor.map(lambda item: inspect_node_live(*item), remotes.items()))
+        else:
+            samples = []
+        nodes = []
+        active_names = set()
+        for sample in samples:
+            name = sample["name"]
+            active_names.add(name)
+            previous = NODE_LIVE_SAMPLES.get(name)
+            elapsed = started - previous["sampled_at"] if previous else 0
+            nodes.append(node_live_rates(sample, previous, elapsed))
+            NODE_LIVE_SAMPLES[name] = {**sample, "sampled_at": started}
+        for name in set(NODE_LIVE_SAMPLES) - active_names:
+            NODE_LIVE_SAMPLES.pop(name, None)
+        nodes.sort(key=lambda item: item["name"])
+        return {
+            "nodes": nodes,
+            "interval_seconds": NODE_LIVE_INTERVAL_SECONDS,
+            "collected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
 
 
@@ -2631,6 +2765,15 @@ class Handler(BaseHTTPRequestHandler):
             if not auth:
                 return
             self.send_json(200, {"users": list_user_accounts()})
+            return
+        if path == "/api/nodes/live":
+            auth = self.require_admin()
+            if not auth:
+                return
+            try:
+                self.send_json(200, node_live_payload())
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
             return
         if path == "/api/notifications":
             auth = self.require_admin()
