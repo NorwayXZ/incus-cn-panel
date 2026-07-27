@@ -336,6 +336,14 @@
     .capacity-item { min-width:0; padding:11px 12px; background:#f9fafb; }
     .capacity-item span { display:block; color:var(--muted); font-size:11px; }
     .capacity-item strong { display:block; margin-top:2px; overflow-wrap:anywhere; }
+    .create-capacity-strip .capacity-item { min-height:94px; display:flex; flex-direction:column; justify-content:center; padding:14px 16px; }
+    .create-capacity-strip .capacity-item strong { margin-top:6px; font-size:20px; line-height:1.2; font-variant-numeric:tabular-nums; overflow-wrap:normal; word-break:keep-all; }
+    .create-capacity-strip .capacity-item small { min-height:17px; display:block; margin-top:5px; color:var(--muted); font-size:10px; line-height:1.45; }
+    @media (max-width:1280px) and (min-width:901px) {
+      .create-capacity-strip { grid-template-columns:repeat(6,minmax(0,1fr)); }
+      .create-capacity-strip .capacity-item { grid-column:span 2; }
+      .create-capacity-strip .capacity-item:nth-child(n+4) { grid-column:span 3; }
+    }
     .batch-capacity { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:14px; padding:12px 14px; color:#175cd3; background:var(--blue-soft); border:1px solid #b2ccff; border-radius:6px; }
     .section-flow > .batch-capacity { margin:0; }
     .batch-capacity strong { font-size:16px; }
@@ -715,7 +723,7 @@
       .placement-grid,.spec-grid,.network-grid,.traffic-settings { grid-template-columns:1fr; }
       .resource-impact { grid-template-columns:repeat(2,minmax(0,1fr)); }
       .create-layout .capacity-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
-      .create-layout .capacity-item:last-child { grid-column:1 / -1; }
+      #view-create .create-layout .create-capacity-strip .capacity-item:last-child { grid-column:1 / -1; }
       .image-profile { align-items:stretch; flex-direction:column; }
       .image-profile .row-actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); width:100%; }
       .image-profile .row-actions .btn { min-width:0; }
@@ -856,7 +864,13 @@
                   <div id="batchFields" class="grid4 hidden"><div class="field"><label for="batchPrefix">名称前缀</label><input id="batchPrefix" value="vps-" placeholder="例如 vps-"></div><div class="field"><label for="batchStart">起始编号</label><input id="batchStart" type="number" min="0" max="999999" value="1"></div><div class="field"><label for="batchPadding">编号位数</label><select id="batchPadding"><option value="2">2 位</option><option value="3" selected>3 位</option><option value="4">4 位</option><option value="5">5 位</option><option value="6">6 位</option></select></div><div class="field"><label for="batchCount">创建数量</label><input id="batchCount" type="number" min="1" value="1"></div></div>
                   <div id="batchNamePreview" class="batch-name-preview hidden"><span>将创建的名称范围</span><strong id="batchNameRange">vps-001</strong></div>
                 </div>
-                <div class="capacity-strip"><div class="capacity-item"><span>可分配 CPU</span><strong id="capacityCpu">-</strong></div><div class="capacity-item"><span>可分配内存</span><strong id="capacityMemory">-</strong></div><div class="capacity-item"><span>可分配磁盘</span><strong id="capacityDisk">-</strong></div><div class="capacity-item"><span>可用 SSH 端口</span><strong id="capacityPorts">-</strong></div><div class="capacity-item"><span>业务端口容量</span><strong id="capacityBusinessPorts">未启用</strong></div></div>
+                <div class="capacity-strip create-capacity-strip">
+                  <div class="capacity-item"><span>可分配 CPU</span><strong id="capacityCpu">-</strong><small id="capacityCpuMeta">选择宿主机后计算</small></div>
+                  <div class="capacity-item"><span>可分配内存</span><strong id="capacityMemory">-</strong><small id="capacityMemoryMeta">选择宿主机后计算</small></div>
+                  <div class="capacity-item"><span>可分配磁盘</span><strong id="capacityDisk">-</strong><small id="capacityDiskMeta">选择宿主机后计算</small></div>
+                  <div class="capacity-item"><span>可用 SSH 端口</span><strong id="capacityPorts">-</strong><small id="capacityPortsMeta">选择宿主机后计算</small></div>
+                  <div class="capacity-item"><span>业务端口容量</span><strong id="capacityBusinessPorts">未启用</strong><small id="capacityBusinessPortsMeta">按需设置端口范围</small></div>
+                </div>
                 <div id="batchCapacity" class="batch-capacity hidden"><span>按当前单机配置，宿主机最多还能创建</span><strong><span id="batchMaximum">0</span> 台</strong><button type="button" class="btn small" id="useBatchMaximum">填入最大数量</button></div>
               </div>
             </section>
@@ -1096,6 +1110,7 @@
     function syncLimitFields(){['readIops','writeIops','ingress','egress','singlePort','batchPort','traffic'].forEach(key=>{$(key+'Custom').classList.toggle('hidden',$(key+'Mode').value!=='custom');});const batch=createMode==='batch',batchTotal=batch&&$('trafficAllocation').value==='batch_total',enabled=$('trafficMode').value==='custom';$('batchTrafficAllocationField').classList.toggle('hidden',!batch);$('trafficValueLabel').textContent=batchTotal?'本批总配额':'每台配额';let quota='不限制';if(enabled){quota=`${$('trafficValue').value} ${$('trafficUnit').value} / 月`;if(batchTotal){const total=Number($('trafficValue').value)*($('trafficUnit').value==='TiB'?1099511627776:1073741824),count=Math.max(1,Number($('batchCount').value||1));quota+=` 本批 · 每台 ${bytes(Math.floor(total/count))}`;}quota+=` · ${$('trafficAction').value==='stop'?'超额停机':'仅通知'}`;}$('summaryTraffic').textContent=quota;}
     function occupiedClientPorts(node){const used=new Set();cluster.instances.filter(x=>x.node===node).forEach(x=>{if(Number(x.ssh_port))used.add(Number(x.ssh_port));const start=Number(x.port_start),end=Number(x.port_end);if(start&&end>=start)for(let port=start;port<=end;port++)used.add(port);});return used;}
     function clientPortBlocks(node,start,end,size){const blocks=[],used=occupiedClientPorts(node);let candidate=start;while(size>0&&candidate+size-1<=end){const blockEnd=candidate+size-1;let conflict=0;for(let port=candidate;port<=blockEnd;port++){if(used.has(port)){conflict=port;break;}}if(conflict)candidate=conflict+1;else{blocks.push([candidate,blockEnd]);candidate=blockEnd+1;}}return blocks;}
+    function setCapacityMetric(id,value,meta){$(id).textContent=value;$(id+'Meta').textContent=meta;}
     function calculateCapacity(){
       const node=cluster.nodes.find(x=>x.name===$('targetNode').value);
       const cpu=Math.max(1,Number($('cpu').value||1));
@@ -1119,26 +1134,25 @@
           portsValid=start>=1024&&end<=65535&&end>=start&&size>=1&&size<=1000;
           batchPortBlocks=portsValid?clientPortBlocks(node.name,start,end,size):[];
           limits.push({label:'业务端口',value:batchPortBlocks.length});
-          $('capacityBusinessPorts').textContent=portsValid?`${batchPortBlocks.length} 段 · 每台 ${size} 个`:'端口池无效';
+          setCapacityMetric('capacityBusinessPorts',portsValid?`${batchPortBlocks.length} 段`:'不可用',portsValid?`每台 ${size} 个端口`:'端口池范围无效');
         }else if(createMode==='single'&&$('singlePortMode').value==='custom'){
           const start=Number($('singlePortStart').value),end=Number($('singlePortEnd').value),ssh=Number($('sshPort').value||0);
           portsValid=start>=1024&&end<=65535&&end>=start&&end-start+1<=1000;
           for(let port=start;portsValid&&port<=end;port++)if(used.has(port)||port===ssh)portsValid=false;
-          $('capacityBusinessPorts').textContent=portsValid?`${end-start+1} 个 · 可用`:'范围无效或冲突';
-        }else $('capacityBusinessPorts').textContent='未启用';
+          setCapacityMetric('capacityBusinessPorts',portsValid?`${end-start+1} 个`:'不可用',portsValid?'当前范围可分配':'范围无效或端口冲突');
+        }else setCapacityMetric('capacityBusinessPorts','未启用','按需设置端口范围');
         const ssh=Number($('sshPort').value||0);
         sshValid=createMode==='batch'||!ssh||(ssh>=1024&&ssh<=65535&&!used.has(ssh));
         const minimum=Math.min(...limits.map(item=>item.value));
         limiter=limits.filter(item=>item.value===minimum).map(item=>item.label).join('、');
         capacityMaximum=cpu<=Number(node.cpu)&&portsValid&&sshValid?Math.max(0,minimum):0;
-        $('capacityCpu').textContent=`剩余 ${formatCpuCores(Number(node.cpu_available_percent||0)/100)} 核 · 安全池 ${formatCpuCores(Number(node.cpu_budget_percent||0)/100)} 核`;
-        $('capacityMemory').textContent=`${bytes(node.available_memory)} 可分配 · 保留 ${bytes(node.memory_reserve||0)}`;
-        $('capacityDisk').textContent=`${bytes(node.available_disk)} 可分配 · 保留 ${bytes(node.disk_reserve||0)}`;
-        $('capacityPorts').textContent=`${node.available_ssh_ports} 个`;
+        setCapacityMetric('capacityCpu',`${formatCpuCores(Number(node.cpu_available_percent||0)/100)} 核`,`安全池总额 ${formatCpuCores(Number(node.cpu_budget_percent||0)/100)} 核`);
+        setCapacityMetric('capacityMemory',bytes(node.available_memory),`宿主机保留 ${bytes(node.memory_reserve||0)}`);
+        setCapacityMetric('capacityDisk',bytes(node.available_disk),`宿主机保留 ${bytes(node.disk_reserve||0)}`);
+        setCapacityMetric('capacityPorts',Number(node.available_ssh_ports||0).toLocaleString('zh-CN'),'可分配 SSH 端口');
       }
       if(!node){
-        ['capacityCpu','capacityMemory','capacityDisk','capacityPorts'].forEach(id=>$(id).textContent='-');
-        $('capacityBusinessPorts').textContent='-';
+        ['capacityCpu','capacityMemory','capacityDisk','capacityPorts','capacityBusinessPorts'].forEach(id=>setCapacityMetric(id,'-','选择宿主机后计算'));
       }
       $('batchMaximum').textContent=capacityMaximum;
       $('batchCount').max=Math.max(1,capacityMaximum);
