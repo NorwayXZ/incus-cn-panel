@@ -155,6 +155,23 @@ RESOURCE_PROFILES = {
         "virtual-machine": {"minimum_memory": "512MiB", "minimum_disk": "2GiB", "recommended_memory": "2GiB", "recommended_disk": "10GiB"},
     },
 }
+PROXY_CONTAINER_PRESETS = {
+    "density": {
+        "label": "轻量代理",
+        "memory": 128 * MIB_BYTES,
+        "disk": 2 * GIB_BYTES,
+    },
+    "balanced": {
+        "label": "标准代理",
+        "memory": 256 * MIB_BYTES,
+        "disk": 4 * GIB_BYTES,
+    },
+    "stable": {
+        "label": "稳定代理",
+        "memory": 512 * MIB_BYTES,
+        "disk": 6 * GIB_BYTES,
+    },
+}
 PUBLIC_IMAGES = (
     {"id": "images:alpine/3.22", "label": "Alpine 3.22", "family": "alpine", "release": "3.22", "channel": "稳定版"},
     {"id": "images:alpine/edge", "label": "Alpine Edge", "family": "alpine", "release": "edge", "channel": "滚动版"},
@@ -2190,6 +2207,21 @@ def _resource_tier(value, minimum, tiers):
     return max(candidates) if candidates else 0
 
 
+def proxy_cpu_allowance(memory):
+    memory = max(0, int(memory or 0))
+    if memory <= 128 * MIB_BYTES:
+        return 25
+    if memory <= 256 * MIB_BYTES:
+        return 50
+    if memory <= 512 * MIB_BYTES:
+        return 100
+    if memory <= GIB_BYTES:
+        return 150
+    if memory <= 2 * GIB_BYTES:
+        return 200
+    return min(400, max(200, (memory // GIB_BYTES) * 100))
+
+
 def scheduler_plan(node_info, count, kind, image_id, strategy="balanced"):
     try:
         count = int(count)
@@ -2211,26 +2243,38 @@ def scheduler_plan(node_info, count, kind, image_id, strategy="balanced"):
     memory_share = int(node_info.get("available_memory", 0)) // count
     disk_share = int(node_info.get("available_disk", 0)) // count
     cpu_share = int(node_info.get("cpu_available_percent", 0)) // count
-    memory_tiers = [128, 256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536]
-    memory_tiers = [value * MIB_BYTES for value in memory_tiers]
-    disk_tiers = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 80, 100, 128, 160, 200, 256, 320, 512, 1024]
-    disk_tiers = [value * GIB_BYTES for value in disk_tiers]
-    factors = {"density": 0.35, "balanced": 0.60, "stable": 0.80}
-    factor = factors[strategy]
-    memory_target = minimum_memory if strategy == "density" else max(recommended_memory, int(memory_share * factor))
-    disk_target = minimum_disk if strategy == "density" else max(recommended_disk, int(disk_share * factor))
-    memory = _resource_tier(min(memory_share, memory_target), minimum_memory, memory_tiers)
-    disk = _resource_tier(min(disk_share, disk_target), minimum_disk, disk_tiers)
-    constrained = memory < minimum_memory or disk < minimum_disk or cpu_share < (100 if kind == "virtual-machine" else 5)
-    cpu_factor = {"density": 0.50, "balanced": 0.70, "stable": 0.85}[strategy]
-    cpu_commitment = max(1, int(cpu_share * cpu_factor / 5) * 5)
     host_cpu = max(1, int(node_info.get("cpu", 1) or 1))
-    if kind == "virtual-machine":
+    if kind == "container":
+        preset = PROXY_CONTAINER_PRESETS[strategy]
+        memory = max(minimum_memory, preset["memory"])
+        disk = max(minimum_disk, preset["disk"])
+        desired_allowance = proxy_cpu_allowance(memory)
+        cpu = max(1, min(host_cpu, 4, (desired_allowance + 99) // 100))
+        cpu_allowance = min(cpu * 100, desired_allowance)
+        preset_label = preset["label"]
+        workload = "proxy"
+        constrained = (
+            memory_share < memory
+            or disk_share < disk
+            or cpu_share < cpu_allowance
+        )
+    else:
+        memory_tiers = [512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536]
+        memory_tiers = [value * MIB_BYTES for value in memory_tiers]
+        disk_tiers = [2, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 80, 100, 128, 160, 200, 256, 320, 512, 1024]
+        disk_tiers = [value * GIB_BYTES for value in disk_tiers]
+        factor = {"density": 0.35, "balanced": 0.60, "stable": 0.80}[strategy]
+        memory_target = minimum_memory if strategy == "density" else max(recommended_memory, int(memory_share * factor))
+        disk_target = minimum_disk if strategy == "density" else max(recommended_disk, int(disk_share * factor))
+        memory = _resource_tier(min(memory_share, memory_target), minimum_memory, memory_tiers)
+        disk = _resource_tier(min(disk_share, disk_target), minimum_disk, disk_tiers)
+        cpu_factor = {"density": 0.50, "balanced": 0.70, "stable": 0.85}[strategy]
+        cpu_commitment = max(1, int(cpu_share * cpu_factor / 5) * 5)
         cpu = max(1, min(host_cpu, 8, cpu_commitment // 100))
         cpu_allowance = 0
-    else:
-        cpu = max(1, min(host_cpu, 4, (cpu_commitment + 99) // 100))
-        cpu_allowance = min(cpu * 100, cpu_commitment)
+        preset_label = "KVM 资源方案"
+        workload = "virtual-machine"
+        constrained = memory < minimum_memory or disk < minimum_disk or cpu_share < 100
     proposed = {
         "type": kind,
         "cpu": str(cpu),
@@ -2243,6 +2287,7 @@ def scheduler_plan(node_info, count, kind, image_id, strategy="balanced"):
     return {
         "node": node_info["name"], "count": count, "kind": kind,
         "image": str(image_id), "strategy": strategy,
+        "workload": workload, "preset_label": preset_label,
         "cpu": cpu, "cpu_allowance": cpu_allowance,
         "memory": proposed["memory"], "memory_bytes": memory or minimum_memory,
         "disk": proposed["disk"], "disk_bytes": disk or minimum_disk,

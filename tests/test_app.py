@@ -22,13 +22,13 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "2.0.0")
+        self.assertEqual(app.APP_VERSION, "2.1.0")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"2.1.0\n"
+        response.read.return_value = b"2.1.1\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "2.1.0")
+            self.assertEqual(app.fetch_latest_version(), "2.1.1")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -37,10 +37,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "2.1.0",
+            "status": "running", "target_version": "2.1.1",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "2.1.0")
+        self.assertEqual(payload["latest_version"], "2.1.1")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -56,7 +56,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("2.1.0")
+                    status = app.start_panel_update("2.1.1")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -64,7 +64,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "2.1.0")
+                self.assertEqual(saved["target_version"], "2.1.1")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -115,7 +115,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "2.0.0")
+                self.assertEqual(data["panel_version"], "2.1.0")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -972,6 +972,8 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("任务中心", app.HTML)
         self.assertIn("renderTasks", app.HTML)
         self.assertIn('id="resourceStrategy"', app.HTML)
+        self.assertIn('id="proxyPresetDetail"', app.HTML)
+        self.assertIn("function syncProxyPresetDetail", app.HTML)
         self.assertIn("状态一致性", app.HTML)
         self.assertIn("备份与网络", app.HTML)
         self.assertIn("生命周期管理", app.HTML)
@@ -1214,6 +1216,61 @@ class ValidationTests(unittest.TestCase):
         self.assertLessEqual(plan["cpu_allowance"] * 3, 340)
         self.assertGreaterEqual(plan["maximum"], 3)
         self.assertFalse(plan["constrained"])
+
+    def test_proxy_scheduler_uses_predictable_container_presets(self):
+        node = {
+            "name": "node-a", "status": "online", "cpu": 8,
+            "cpu_budget_percent": 680, "cpu_committed_percent": 0,
+            "cpu_available_percent": 680,
+            "available_memory": 8 * app.GIB_BYTES,
+            "available_disk": 100 * app.GIB_BYTES,
+            "available_ssh_ports": 100, "instances": [],
+        }
+        expected = {
+            "density": (128 * app.MIB_BYTES, 2 * app.GIB_BYTES, 25),
+            "balanced": (256 * app.MIB_BYTES, 4 * app.GIB_BYTES, 50),
+            "stable": (512 * app.MIB_BYTES, 6 * app.GIB_BYTES, 100),
+        }
+        for strategy, (memory, disk, allowance) in expected.items():
+            with self.subTest(strategy=strategy):
+                plan = app.scheduler_plan(
+                    node, 3, "container", "images:alpine/3.22", strategy,
+                )
+                self.assertEqual(plan["workload"], "proxy")
+                self.assertEqual(plan["memory_bytes"], memory)
+                self.assertEqual(plan["disk_bytes"], disk)
+                self.assertEqual(plan["cpu"], 1)
+                self.assertEqual(plan["cpu_allowance"], allowance)
+                self.assertEqual(plan["swap_bytes"], 512 * app.MIB_BYTES)
+
+    def test_proxy_scheduler_raises_resources_for_heavier_image(self):
+        node = {
+            "name": "node-a", "status": "online", "cpu": 4,
+            "cpu_available_percent": 340,
+            "available_memory": 4 * app.GIB_BYTES,
+            "available_disk": 60 * app.GIB_BYTES,
+            "available_ssh_ports": 100, "instances": [],
+        }
+        plan = app.scheduler_plan(
+            node, 2, "container", "images:ubuntu/24.04", "density",
+        )
+        self.assertEqual(plan["memory_bytes"], 512 * app.MIB_BYTES)
+        self.assertEqual(plan["disk_bytes"], 4 * app.GIB_BYTES)
+        self.assertEqual(plan["cpu_allowance"], 100)
+
+    def test_proxy_scheduler_rejects_batch_beyond_cpu_budget(self):
+        node = {
+            "name": "node-a", "status": "online", "cpu": 4,
+            "cpu_available_percent": 340,
+            "available_memory": 8 * app.GIB_BYTES,
+            "available_disk": 80 * app.GIB_BYTES,
+            "available_ssh_ports": 100, "instances": [],
+        }
+        plan = app.scheduler_plan(
+            node, 14, "container", "images:alpine/3.22", "density",
+        )
+        self.assertEqual(plan["maximum"], 13)
+        self.assertTrue(plan["constrained"])
 
     def test_reconcile_repairs_orphaned_control_records(self):
         old_values = (
