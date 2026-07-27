@@ -86,6 +86,8 @@ PANEL_TIMEZONE = ZoneInfo(os.environ.get("PANEL_TIMEZONE", "Asia/Shanghai"))
 MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", str(8 * 1024**3)))
 NODE_LIVE_SAMPLES = {}
 NODE_LIVE_INTERVAL_SECONDS = 5
+MIB_BYTES = 1024**2
+GIB_BYTES = 1024**3
 
 
 def read_panel_version(path=VERSION_FILE):
@@ -730,6 +732,61 @@ def parse_size_bytes(value):
     return int(number * ((1000 if decimal else 1024) ** exponent))
 
 
+def host_memory_reserve(total):
+    total = max(0, int(total or 0))
+    if not total:
+        return 0
+    reserve_step = 512 * MIB_BYTES
+    proportional = ((total // 10 + reserve_step - 1) // reserve_step) * reserve_step
+    target = max(reserve_step, proportional)
+    return min(target, total // 2)
+
+
+def host_disk_reserve(total):
+    total = max(0, int(total or 0))
+    if not total:
+        return 0
+    proportional = ((total // 20 + GIB_BYTES - 1) // GIB_BYTES) * GIB_BYTES
+    target = max(2 * GIB_BYTES, proportional)
+    return min(target, max(512 * MIB_BYTES, total // 4))
+
+
+def recommended_swap_bytes(memory, disk, kind="container"):
+    if kind != "container":
+        return 0
+    memory_bytes = parse_size_bytes(memory)
+    disk_bytes = parse_size_bytes(disk)
+    if not memory_bytes or not disk_bytes:
+        return 0
+    if memory_bytes <= 512 * MIB_BYTES:
+        target = 512 * MIB_BYTES
+    elif memory_bytes <= GIB_BYTES:
+        target = GIB_BYTES
+    elif memory_bytes <= 2 * GIB_BYTES:
+        target = 2 * GIB_BYTES
+    elif memory_bytes <= 4 * GIB_BYTES:
+        target = 2 * GIB_BYTES
+    elif memory_bytes <= 8 * GIB_BYTES:
+        target = 4 * GIB_BYTES
+    else:
+        target = 8 * GIB_BYTES
+    disk_limit = disk_bytes // 2
+    tiers = (128, 256, 512, 1024, 2048, 4096, 8192)
+    eligible = [
+        tier * MIB_BYTES
+        for tier in tiers
+        if tier * MIB_BYTES <= target and tier * MIB_BYTES <= disk_limit
+    ]
+    return max(eligible, default=0)
+
+
+def format_binary_size(value):
+    value = int(value or 0)
+    if value and value % GIB_BYTES == 0:
+        return f"{value // GIB_BYTES}GiB"
+    return f"{value // MIB_BYTES}MiB"
+
+
 def allocation_summary(instances, memory_total=0):
     cpu = 0
     memory = 0
@@ -802,6 +859,7 @@ def parse_instances(node, raw):
             "cpu": config.get("limits.cpu", "不限"),
             "cpu_allowance": config.get("limits.cpu.allowance", "100%"),
             "memory": config.get("limits.memory", "不限"),
+            "swap": config.get("limits.memory.swap", "未配置"),
             "disk": root_device.get("size", "不限"),
             "image": config.get("user.incus-cn-panel.image", "未知镜像"),
             "ssh_port": config.get("user.incus-cn-panel.ssh-port", ""),
@@ -987,8 +1045,17 @@ def inspect_node(name, remote):
             pass
         allocations = allocation_summary(instances, int(memory.get("total", 0)))
         occupied_ports = occupied_host_ports(instances)
-        memory_reserved = max(int(memory.get("used", 0)), allocations["memory"])
-        disk_reserved = max(disk_used, allocations["disk"])
+        memory_total = int(memory.get("total", 0))
+        memory_used = int(memory.get("used", 0))
+        instance_memory_used = sum(
+            int(instance.get("memory_used_bytes", 0) or 0)
+            for instance in instances
+        )
+        host_memory_used = max(0, memory_used - instance_memory_used)
+        memory_reserve = host_memory_reserve(memory_total)
+        memory_committed = max(memory_used, host_memory_used + allocations["memory"])
+        disk_reserve = host_disk_reserve(disk_total)
+        disk_committed = max(disk_used, allocations["disk"])
         load = resources.get("load") or {}
         try:
             images = parse_node_images(
@@ -1004,16 +1071,21 @@ def inspect_node(name, remote):
             "address": address,
             "status": "online",
             "cpu": int((resources.get("cpu") or {}).get("total", 0)),
-            "memory": int(memory.get("total", 0)),
-            "memory_used": int(memory.get("used", 0)),
+            "memory": memory_total,
+            "memory_used": memory_used,
+            "host_memory_used": host_memory_used,
+            "memory_reserve": memory_reserve,
             "disk": disk_total,
             "disk_used": disk_used,
+            "disk_reserve": disk_reserve,
             "allocated_cpu": allocations["cpu"],
             "allocated_memory": allocations["memory"],
             "allocated_disk": allocations["disk"],
             "available_cpu": int((resources.get("cpu") or {}).get("total", 0)),
-            "available_memory": max(0, int(memory.get("total", 0)) - memory_reserved),
-            "available_disk": max(0, disk_total - disk_reserved),
+            "available_memory": max(
+                0, memory_total - memory_committed - memory_reserve
+            ),
+            "available_disk": max(0, disk_total - disk_committed - disk_reserve),
             "available_ssh_ports": sum(
                 port not in occupied_ports
                 for port in range(SSH_PORT_MIN, SSH_PORT_MAX + 1)
@@ -1036,8 +1108,11 @@ def inspect_node(name, remote):
             "cpu": 0,
             "memory": 0,
             "memory_used": 0,
+            "host_memory_used": 0,
+            "memory_reserve": 0,
             "disk": 0,
             "disk_used": 0,
+            "disk_reserve": 0,
             "allocated_cpu": 0,
             "allocated_memory": 0,
             "allocated_disk": 0,
@@ -2388,6 +2463,7 @@ def create_instance(data):
     if ssh_port and (not ssh_port.isdigit() or not 1024 <= int(ssh_port) <= 65535):
         raise ValueError("SSH 端口必须在 1024 到 65535 之间")
     port_range = validate_port_range(port_start, port_end)
+    swap_bytes = recommended_swap_bytes(memory, disk, kind)
 
     ref = f"{node}:{name}"
     created = False
@@ -2412,6 +2488,10 @@ def create_instance(data):
         init_args.extend(["-c", f"limits.cpu={cpu}"])
         if kind == "container":
             init_args.extend(["-c", f"limits.cpu.allowance={cpu_allowance}ms/100ms"])
+            if swap_bytes:
+                init_args.extend([
+                    "-c", f"limits.memory.swap={format_binary_size(swap_bytes)}",
+                ])
         init_args.extend([
             "-c", f"limits.memory={memory}",
             "-c", f"user.incus-cn-panel.image={image}",

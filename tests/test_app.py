@@ -22,8 +22,8 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.6.3")
-        self.assertLess(app.version_tuple("1.6.3"), app.version_tuple("1.7.0"))
+        self.assertEqual(app.APP_VERSION, "1.6.4")
+        self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
         response.read.return_value = b"1.7.0\n"
         response.__enter__.return_value = response
@@ -115,7 +115,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "1.6.3")
+                self.assertEqual(data["panel_version"], "1.6.4")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -149,11 +149,17 @@ class ValidationTests(unittest.TestCase):
             app.DATA_DIR = old_data_dir
 
     def test_node_installer_requires_incus_server_package(self):
-        installer = os.path.join(os.path.dirname(app.__file__), "install-node.sh")
+        root = os.path.dirname(app.__file__)
+        installer = os.path.join(root, "install-node.sh")
         with open(installer, encoding="utf-8") as source_file:
             source = source_file.read()
+        with open(os.path.join(root, "uninstall-node.sh"), encoding="utf-8") as source_file:
+            uninstaller = source_file.read()
         self.assertIn("dpkg-query -W -f='${Status}' incus", source)
         self.assertNotIn("if ! command -v incus", source)
+        self.assertIn("ensure_host_swap", source)
+        self.assertIn("/var/lib/incus-host.swap", source)
+        self.assertIn("swapoff /var/lib/incus-host.swap", uninstaller)
         self.assertLess(
             source.index("/usr/local/sbin/incus-cn-node-uninstall"),
             source.index("apt-get update"),
@@ -238,6 +244,29 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(summary["disk"], 15 * 1024**3)
         self.assertEqual(summary["unlimited_instances"], 1)
         self.assertEqual(summary["ssh_ports"], 1)
+
+    def test_host_reserves_and_automatic_swap_use_standard_tiers(self):
+        self.assertEqual(app.host_memory_reserve(1024**3), 512 * 1024**2)
+        self.assertEqual(app.host_memory_reserve(8 * 1024**3), 1024**3)
+        self.assertEqual(app.host_disk_reserve(20 * 1024**3), 2 * 1024**3)
+        self.assertEqual(app.host_disk_reserve(100 * 1024**3), 5 * 1024**3)
+        for memory in ("128MiB", "256MiB", "512MiB"):
+            self.assertEqual(
+                app.recommended_swap_bytes(memory, "2GiB"),
+                512 * 1024**2,
+            )
+        self.assertEqual(
+            app.recommended_swap_bytes("1GiB", "1GiB"),
+            512 * 1024**2,
+        )
+        self.assertEqual(
+            app.recommended_swap_bytes("1GiB", "4GiB"),
+            1024**3,
+        )
+        self.assertEqual(
+            app.recommended_swap_bytes("1GiB", "4GiB", "virtual-machine"),
+            0,
+        )
 
     def test_capacity_treats_cpu_as_shared_and_uses_hard_resources(self):
         maximum, limits = app.maximum_instances({
@@ -895,10 +924,14 @@ class ValidationTests(unittest.TestCase):
         self.assertIn('id="applySmartPlan"', app.HTML)
         self.assertIn('id="smartPlanText"', app.HTML)
         self.assertIn('id="cpuPolicyText"', app.HTML)
+        self.assertIn('id="swapPolicyText"', app.HTML)
+        self.assertIn('id="summarySwap"', app.HTML)
         self.assertIn("100% = 1 核", app.HTML)
         self.assertIn("KVM 分配", app.HTML)
         self.assertIn("function smartResourcePlan", app.HTML)
         self.assertIn("function smartImageForPlan", app.HTML)
+        self.assertIn("function standardMemoryBytes", app.HTML)
+        self.assertIn("function smartSwapBytes", app.HTML)
         self.assertIn("applySmartConfiguration({selectImage:!smartImageLocked})", app.HTML)
         self.assertNotIn("count>capacityMaximum||count===previous", app.HTML)
         for element_id in ("summaryCheck", "batchNameRange", "remainingMemory", "remainingDisk"):
@@ -1025,6 +1058,7 @@ class ValidationTests(unittest.TestCase):
                 "limits.cpu": "1",
                 "limits.cpu.allowance": "50%",
                 "limits.memory": "256MiB",
+                "limits.memory.swap": "512MiB",
                 "user.incus-cn-panel.image": "images:alpine/edge",
                 "user.incus-cn-panel.ssh-port": "22001",
                 "user.incus-cn-panel.port-start": "10000",
@@ -1052,6 +1086,7 @@ class ValidationTests(unittest.TestCase):
         }])
         self.assertEqual(instances[0]["disk"], "2GiB")
         self.assertEqual(instances[0]["cpu_allowance"], "50%")
+        self.assertEqual(instances[0]["swap"], "512MiB")
         self.assertEqual(instances[0]["ssh_port"], "22001")
         self.assertEqual(instances[0]["image"], "images:alpine/edge")
         self.assertEqual(instances[0]["port_start"], "10000")
@@ -1062,6 +1097,35 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(instances[0]["traffic_action"], "stop")
         self.assertEqual(instances[0]["network_rx_bytes"], 2000)
         self.assertEqual(instances[0]["network_tx_bytes"], 1000)
+
+    @mock.patch("app.run_incus")
+    def test_node_capacity_keeps_host_memory_and_safety_reserves(self, run_incus):
+        resources = {
+            "cpu": {"total": 4},
+            "memory": {"total": 4 * 1024**3, "used": 1024**3},
+            "load": {"Average1Min": 0.2},
+            "storage": {"disks": [{"size": 20 * 1024**3}]},
+        }
+        instances = [{
+            "name": "vps-01", "type": "container", "status": "Running",
+            "expanded_config": {"limits.cpu": "1", "limits.memory": "1GiB"},
+            "expanded_devices": {
+                "root": {"type": "disk", "path": "/", "size": "5GiB"},
+            },
+            "state": {"memory": {"usage": 512 * 1024**2}},
+        }]
+        pool = {"space": {"total": 20 * 1024**3, "used": 4 * 1024**3}}
+        run_incus.side_effect = [
+            json.dumps(resources), json.dumps(instances), json.dumps(pool), "[]",
+        ]
+
+        node = app.inspect_node("node-a", {"Addrs": ["https://203.0.113.10:8443"]})
+
+        self.assertEqual(node["host_memory_used"], 512 * 1024**2)
+        self.assertEqual(node["memory_reserve"], 512 * 1024**2)
+        self.assertEqual(node["available_memory"], 2 * 1024**3)
+        self.assertEqual(node["disk_reserve"], 2 * 1024**3)
+        self.assertEqual(node["available_disk"], 13 * 1024**3)
 
     @mock.patch("app.run_incus")
     def test_live_node_snapshot_aggregates_instance_counters(self, run_incus):
@@ -1297,6 +1361,7 @@ class ValidationTests(unittest.TestCase):
         init_call = next(call for call in run_incus.call_args_list if call.args[0] == "init")
         self.assertIn("limits.cpu=2", init_call.args)
         self.assertIn("limits.cpu.allowance=150ms/100ms", init_call.args)
+        self.assertIn("limits.memory.swap=512MiB", init_call.args)
         self.assertIn(f"user.incus-cn-panel.traffic-limit-bytes={500 * 1024**3}", init_call.args)
         self.assertIn("user.incus-cn-panel.traffic-action=stop", init_call.args)
         self.assertIn(
@@ -1369,6 +1434,10 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("limits.cpu=2", init_call.args)
         self.assertFalse(any(
             str(argument).startswith("limits.cpu.allowance=")
+            for argument in init_call.args
+        ))
+        self.assertFalse(any(
+            str(argument).startswith("limits.memory.swap=")
             for argument in init_call.args
         ))
 

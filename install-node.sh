@@ -26,6 +26,47 @@ free_kb=$(df -Pk / | awk 'NR==2 {print $4}')
 memory_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
 (( memory_kb >= 1048576 )) || warn "内存少于 1 GiB，只适合极小型系统容器。"
 
+ensure_host_swap() {
+  local current_swap_kb free_mb memory_mb target_mb available_mb swap_mb=0 tier
+  current_swap_kb=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)
+  if (( current_swap_kb > 0 )); then
+    log "宿主机已有 $((current_swap_kb / 1024)) MiB Swap，保留现有配置"
+    return
+  fi
+  memory_mb=$((memory_kb / 1024))
+  if (( memory_mb <= 4096 )); then
+    target_mb=2048
+  elif (( memory_mb <= 8192 )); then
+    target_mb=4096
+  else
+    target_mb=8192
+  fi
+  free_mb=$(df -Pm /var/lib | awk 'NR==2 {print $4}')
+  available_mb=$((free_mb - 2048))
+  for tier in 512 1024 2048 4096 8192; do
+    if (( tier <= target_mb && tier <= available_mb )); then
+      swap_mb=$tier
+    fi
+  done
+  if (( swap_mb < 512 )); then
+    warn "磁盘余量不足，无法在保留 2 GiB 空间后创建宿主机 Swap"
+    return
+  fi
+  log "创建 ${swap_mb} MiB 宿主机 Swap，供 LXC 按实例上限共享使用"
+  if ! fallocate -l "${swap_mb}M" /var/lib/incus-host.swap 2>/dev/null; then
+    dd if=/dev/zero of=/var/lib/incus-host.swap bs=1M count="$swap_mb" status=none
+  fi
+  chmod 0600 /var/lib/incus-host.swap
+  if ! mkswap /var/lib/incus-host.swap >/dev/null \
+    || ! swapon /var/lib/incus-host.swap; then
+    warn "当前虚拟化环境不允许启用 Swap，跳过宿主机 Swap 配置"
+    rm -f /var/lib/incus-host.swap
+    return
+  fi
+  grep -qF '/var/lib/incus-host.swap none swap sw 0 0' /etc/fstab \
+    || printf '%s\n' '/var/lib/incus-host.swap none swap sw 0 0' >> /etc/fstab
+}
+
 if [[ -f "$SCRIPT_DIR/uninstall-node.sh" ]]; then
   install -m 0755 "$SCRIPT_DIR/uninstall-node.sh" /usr/local/sbin/incus-cn-node-uninstall
 fi
@@ -60,6 +101,7 @@ for _ in {1..30}; do
   sleep 1
 done
 incus version >/dev/null 2>&1 || die "Incus 服务未能正常启动。"
+ensure_host_swap
 
 if ! incus storage show default >/dev/null 2>&1; then
   log "初始化 dir 存储池和 NAT 网桥"

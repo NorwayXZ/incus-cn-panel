@@ -15,6 +15,12 @@ fi
 systemctl disable --now incus.service incus.socket incus-user.service incus-user.socket \
   2>/dev/null || true
 
+if [[ -f /var/lib/incus-host.swap ]]; then
+  swapoff /var/lib/incus-host.swap 2>/dev/null || true
+  sed -i '\|^/var/lib/incus-host\.swap[[:space:]]|d' /etc/fstab
+  rm -f /var/lib/incus-host.swap
+fi
+
 packages=()
 for package in incus incus-base incus-client; do
   if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -qx 'install ok installed'; then
