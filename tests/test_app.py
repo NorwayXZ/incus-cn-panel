@@ -22,13 +22,13 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.8.0")
+        self.assertEqual(app.APP_VERSION, "2.0.0")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"1.9.0\n"
+        response.read.return_value = b"2.1.0\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "1.9.0")
+            self.assertEqual(app.fetch_latest_version(), "2.1.0")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -37,10 +37,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "1.9.0",
+            "status": "running", "target_version": "2.1.0",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "1.9.0")
+        self.assertEqual(payload["latest_version"], "2.1.0")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -56,7 +56,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("1.9.0")
+                    status = app.start_panel_update("2.1.0")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -64,7 +64,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "1.9.0")
+                self.assertEqual(saved["target_version"], "2.1.0")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -115,7 +115,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "1.8.0")
+                self.assertEqual(data["panel_version"], "2.0.0")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -462,7 +462,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertFalse(app.password_matches("current-password"))
                 self.assertNotIn("admin-token", app.SESSIONS)
                 record_operation.assert_called_once_with(
-                    "admin_password_change", app.PANEL_USER, message="管理员密码已修改",
+                    "admin_password_change", app.PANEL_USER, message="账户密码已修改",
                 )
         finally:
             if server is not None:
@@ -911,7 +911,7 @@ class ValidationTests(unittest.TestCase):
                     self.assertEqual(request("GET", "/api/nodes/live")[0], 403)
                     self.assertEqual(request("POST", "/api/instances", {})[0], 403)
                     self.assertEqual(request("POST", "/api/system/update", {})[0], 403)
-                    self.assertEqual(request("POST", "/api/account/password", {})[0], 403)
+                    self.assertEqual(request("POST", "/api/account/password", {})[0], 400)
                     self.assertEqual(request("POST", "/api/notifications/scan", {})[0], 403)
                     self.assertEqual(request(
                         "POST", "/api/nodes/node-a/instances/web-01/traffic", {},
@@ -977,6 +977,12 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("生命周期管理", app.HTML)
         self.assertIn("独立端口转发", app.HTML)
         self.assertIn("命令控制台", app.HTML)
+        self.assertIn('id="totpLoginField"', app.HTML)
+        self.assertIn("账户安全", app.HTML)
+        self.assertIn("趋势监控", app.HTML)
+        self.assertIn('id="metricLoadChart"', app.HTML)
+        self.assertIn('id="quotaInstances"', app.HTML)
+        self.assertIn("/api/account/tokens", app.HTML)
         self.assertIn("月流量配额", app.HTML)
         self.assertIn('id="applySmartPlan"', app.HTML)
         self.assertIn('id="smartPlanText"', app.HTML)
@@ -1847,6 +1853,151 @@ class ValidationTests(unittest.TestCase):
         self.assertIn(mock.call("start", "node-a:legacy-01", timeout=180), run_incus.call_args_list)
         provision_ssh.assert_called_once_with("node-a:legacy-01", "generated-password")
         save_credentials.assert_called_once_with("node-a", "legacy-01", access)
+
+    def test_totp_matches_rfc_vector_and_login_requires_code(self):
+        self.assertEqual(
+            app.totp_code("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", timestamp=59),
+            "287082",
+        )
+        old_values = (app.DATA_DIR, app.USERS_FILE, app.SECURITY_FILE)
+        server = None
+        thread = None
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.USERS_FILE = os.path.join(directory, "users.json")
+                app.SECURITY_FILE = os.path.join(directory, "security.json")
+                app.create_user_account("secure-user", "strong-password")
+                setup = app.begin_totp_setup("secure-user")
+                app.confirm_totp_setup("secure-user", app.totp_code(setup["secret"]))
+                server = app.PanelServer(("127.0.0.1", 0), app.Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+
+                def login(totp=""):
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", server.server_address[1], timeout=5,
+                    )
+                    body = json.dumps({
+                        "username": "secure-user", "password": "strong-password",
+                        "totp": totp,
+                    })
+                    connection.request("POST", "/api/login", body=body, headers={"Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    payload = json.loads(response.read())
+                    connection.close()
+                    return response.status, payload
+
+                with mock.patch.object(app.Handler, "log_message", return_value=None):
+                    status, payload = login()
+                    self.assertEqual(status, 401)
+                    self.assertTrue(payload["totp_required"])
+                    valid_code = app.totp_code(setup["secret"])
+                    wrong_code = "000000" if valid_code != "000000" else "111111"
+                    self.assertEqual(login(wrong_code)[0], 401)
+                    self.assertEqual(len(app.LOGIN_ATTEMPTS.get("127.0.0.1", [])), 1)
+                    status, payload = login(valid_code)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(payload["account"]["username"], "secure-user")
+        finally:
+            if server:
+                server.shutdown()
+                server.server_close()
+            if thread:
+                thread.join(timeout=5)
+            app.SESSIONS.clear()
+            app.DATA_DIR, app.USERS_FILE, app.SECURITY_FILE = old_values
+
+    def test_api_tokens_are_hashed_expire_and_enforce_scope(self):
+        old_values = (app.DATA_DIR, app.SECURITY_FILE)
+        server = None
+        thread = None
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.SECURITY_FILE = os.path.join(directory, "security.json")
+                plaintext, public = app.create_api_token("readonly-ci", "read", 30)
+                with open(app.SECURITY_FILE, encoding="utf-8") as handle:
+                    stored = json.load(handle)["api_tokens"][0]
+                self.assertNotIn(plaintext, json.dumps(stored))
+                self.assertEqual(public["scope"], "read")
+                self.assertEqual(app.authenticate_api_token(plaintext)["auth_type"], "api_token")
+
+                server = app.PanelServer(("127.0.0.1", 0), app.Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+
+                def request(method, path, payload=None):
+                    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+                    headers = {"Authorization": f"Bearer {plaintext}"}
+                    body = json.dumps(payload) if payload is not None else None
+                    if body:
+                        headers["Content-Type"] = "application/json"
+                    connection.request(method, path, body=body, headers=headers)
+                    response = connection.getresponse()
+                    data = json.loads(response.read())
+                    connection.close()
+                    return response.status, data
+
+                with mock.patch.object(app.Handler, "log_message", return_value=None):
+                    self.assertEqual(request("GET", "/api/v1/health")[0], 200)
+                    self.assertEqual(request("POST", "/api/account/tokens", {"label": "blocked"})[0], 403)
+        finally:
+            if server:
+                server.shutdown()
+                server.server_close()
+            if thread:
+                thread.join(timeout=5)
+            app.DATA_DIR, app.SECURITY_FILE = old_values
+
+    def test_user_quotas_reject_overcommitted_assignments(self):
+        old_values = (app.DATA_DIR, app.USERS_FILE)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.USERS_FILE = os.path.join(directory, "users.json")
+                app.create_user_account("quota-user", "strong-password")
+                future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+                instances = [{
+                    "node": "node-a", "name": "large", "type": "container",
+                    "cpu": "2", "cpu_allowance": "100%", "memory": "2GiB",
+                    "disk": "20GiB", "traffic_limit_bytes": 500 * 1024**3,
+                }]
+                quotas = {
+                    "max_instances": 1, "cpu_percent": 100, "memory_bytes": 1024**3,
+                    "disk_bytes": 10 * 1024**3, "traffic_bytes": 100 * 1024**3,
+                }
+                with mock.patch("app.overview", return_value=([], instances)), self.assertRaisesRegex(ValueError, "超过用户配额"):
+                    app.update_user_account("quota-user", assignments=[{
+                        "instance": "node-a/large", "expires_at": future,
+                    }], quotas=quotas)
+        finally:
+            app.DATA_DIR, app.USERS_FILE = old_values
+
+    def test_metric_history_is_private_and_range_filtered(self):
+        old_values = (app.DATA_DIR, app.METRICS_FILE)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.METRICS_FILE = os.path.join(directory, "metrics-history.json")
+                nodes = [{
+                    "name": "node-a", "status": "online", "cpu": 4, "load": 1.5,
+                    "memory": 8 * 1024**3, "memory_used": 2 * 1024**3,
+                    "disk": 100 * 1024**3, "disk_used": 25 * 1024**3,
+                    "instance_count": 1,
+                }]
+                instances = [{
+                    "node": "node-a", "status": "Running",
+                    "network_rx_bytes": 100, "network_tx_bytes": 200,
+                }]
+                app.record_metric_history(nodes, instances)
+                payload = app.metrics_payload("node-a", 3600)
+                point = payload["nodes"]["node-a"][0]
+                self.assertEqual(point["memory_percent"], 25.0)
+                self.assertEqual(point["running"], 1)
+                self.assertEqual(os.stat(app.METRICS_FILE).st_mode & 0o777, 0o600)
+        finally:
+            app.DATA_DIR, app.METRICS_FILE = old_values
 
 
 if __name__ == "__main__":

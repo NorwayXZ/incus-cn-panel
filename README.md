@@ -47,6 +47,11 @@
 - 创建、停用、重置和删除普通账户，并将指定实例授权给普通账户
 - 实例授权支持 1、2、3、6、12 个月或自定义到期日；到期后服务端立即拒绝访问
 - 普通账户只能查看自己的有效授权、SSH 信息，并启动、停止或重启获授权实例
+- 管理员可为普通账户设置实例数量、CPU 承诺、内存、磁盘和月流量总配额，保存授权时由服务端按实例实际规格拒绝超额分配
+- 管理员和普通用户都可修改自己的密码并启用 TOTP 动态验证码；启用后必须同时提供密码和验证器中的 6 位验证码
+- 管理员可创建只读或读写 API Token，明文只显示一次、服务端只保存 SHA-256 哈希，并支持 30-365 天有效期和即时撤销
+- 提供鉴权的 `/api/v1/health`、`nodes`、`instances`、`tasks` 和 `metrics` 稳定接口；Bearer Token 的只读权限不能执行任何写操作
+- 巡检每 5 分钟记录宿主机负载、内存、磁盘、实例数量和累计网络指标，趋势监控支持 6 小时、24 小时、7 天和 30 天范围
 - 后台定时巡检宿主机离线、内存/磁盘/负载过高、镜像查询失败，以及实例状态、IPv4 和异常消失
 - 异常通知中心记录首次发生、持续状态和恢复事件；每类异常可关闭、仅在面板显示或同时推送 Telegram
 - Telegram Bot Token 加密传输、以 `0600` 权限保存在控制端且不会返回浏览器，支持测试消息和恢复通知
@@ -96,7 +101,7 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 
 安装完成后会显示访问地址和随机密码，凭据保存在 `/root/incus-cn-panel-credentials.txt`。面板默认使用自签名 HTTPS 证书；已有 Caddy 域名时可参考 [Caddy 反向代理](docs/caddy.md)。
 
-登录后可点击页面右上角“管理员账户”修改密码。系统会校验当前密码，并以 PBKDF2-SHA256 重新生成盐和哈希；成功后需要使用新密码重新登录。`/root/incus-cn-panel-credentials.txt` 只记录安装时的初始密码，之后不会保存新密码明文。
+登录后可点击页面右上角“账户安全”修改密码或启用动态验证码。系统会校验当前密码，并以 PBKDF2-SHA256 重新生成盐和哈希；成功后需要使用新密码重新登录。`/root/incus-cn-panel-credentials.txt` 只记录安装时的初始密码，之后不会保存新密码明文。
 
 ## 安装计算节点
 
@@ -119,7 +124,14 @@ LXC 的“最多并行 vCPU”控制实例可以同时使用多少个 CPU 线程
 
 CPU 采用严格不超配预算。以 4 核宿主机为例，面板保留 15% 即 0.6 核给宿主系统，实例安全池为 3.4 核。若现有实例已经承诺 1.5 核，那么还能分配 1.9 核；新建两台 LXC 时每台最多分配 0.95 核持续算力。前端会立即提示超额，后端在真正创建前还会再次校验，所以即使所有实例同时达到上限，合计也不会超过安全池。未设置 CPU 上限的外部实例按宿主机全部核心保守计账，避免未知负载被错误当作 0。这里保证的是面板管理实例的 CPU 上限不超配；宿主机上面板之外的进程仍需由管理员控制。
 
-操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，管理员密码哈希保存在 `/var/lib/incus-cn-panel/password.env`，实例 SSH 凭据保存在 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，任务、宿主机体检和状态核对分别保存在 `tasks.json`、`node-health.json` 与 `reconcile-status.json`。实例导出备份位于 `backups/`，备份策略和域名路由分别保存在 `backups.json` 与 `domain-routes.json`，生成的 Caddy 配置为 `Caddyfile.routes`。版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`。这些敏感文件权限均为 `0600`，再次运行控制端安装命令会原地升级并保留数据。
+操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，管理员密码哈希保存在 `/var/lib/incus-cn-panel/password.env`，实例 SSH 凭据保存在 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希、配额和限时授权保存在 `/var/lib/incus-cn-panel/users.json`。TOTP 密钥与 API Token 哈希保存在 `security.json`，30 天趋势指标保存在 `metrics-history.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，任务、宿主机体检和状态核对分别保存在 `tasks.json`、`node-health.json` 与 `reconcile-status.json`。实例导出备份位于 `backups/`，备份策略和域名路由分别保存在 `backups.json` 与 `domain-routes.json`，生成的 Caddy 配置为 `Caddyfile.routes`。版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`。这些敏感文件权限均为 `0600`，再次运行控制端安装命令会原地升级并保留数据。
+
+自动化调用示例：
+
+```bash
+curl -H 'Authorization: Bearer icp_只显示一次的Token' \
+  https://panel.example.com/api/v1/health
+```
 
 宿主机实时监控只在管理员打开“宿主机”页面时查询，离开页面后自动停止。内存、存储池和 1 分钟负载来自 Incus 宿主机资源接口；“实例 CPU”“实例上传”“实例下载”由该宿主机上全部实例的累计计数器差分计算，不包含 Incus 服务、SSH 等宿主机系统进程自身的 CPU 与管理流量。
 

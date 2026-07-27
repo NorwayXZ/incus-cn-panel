@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import hashlib
 import hmac
+import base64
 import json
 import os
 import re
@@ -44,6 +45,8 @@ BACKUPS_FILE = os.path.join(DATA_DIR, "backups.json")
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 DOMAINS_FILE = os.path.join(DATA_DIR, "domain-routes.json")
 CADDY_ROUTES_FILE = os.path.join(DATA_DIR, "Caddyfile.routes")
+SECURITY_FILE = os.path.join(DATA_DIR, "security.json")
+METRICS_FILE = os.path.join(DATA_DIR, "metrics-history.json")
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
 UPDATE_STATUS_FILE = os.path.join(DATA_DIR, "update-status.json")
@@ -67,6 +70,8 @@ NOTIFICATION_LOCK = threading.RLock()
 TRAFFIC_LOCK = threading.RLock()
 BACKUP_LOCK = threading.RLock()
 DOMAIN_LOCK = threading.RLock()
+SECURITY_LOCK = threading.RLock()
+METRICS_LOCK = threading.RLock()
 UPDATE_LOCK = threading.RLock()
 TASK_LOCK = threading.RLock()
 NODE_HEALTH_LOCK = threading.RLock()
@@ -98,11 +103,15 @@ HOST_PORT_MAX = 65535
 MAX_PORTS_PER_INSTANCE = 1000
 USER_PASSWORD_ITERATIONS = 260000
 MAX_USER_ASSIGNMENTS = 500
+USER_QUOTA_KEYS = ("max_instances", "cpu_percent", "memory_bytes", "disk_bytes", "traffic_bytes")
 MAX_JSON_BODY_BYTES = 128 * 1024
 MAX_NOTIFICATION_EVENTS = 500
 MAX_TRAFFIC_LIMIT_BYTES = 1024**5
 MAX_TASKS = 300
 RECONCILE_INTERVAL_SECONDS = 10 * 60
+METRICS_INTERVAL_SECONDS = 5 * 60
+METRICS_RETENTION_SECONDS = 30 * 24 * 60 * 60
+MAX_API_TOKENS = 50
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 PANEL_TIMEZONE = ZoneInfo(os.environ.get("PANEL_TIMEZONE", "Asia/Shanghai"))
 MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", str(8 * 1024**3)))
@@ -409,7 +418,70 @@ def assignment_map(record):
     return assignments if isinstance(assignments, dict) else {}
 
 
-def _public_user(username, record):
+def default_user_quotas():
+    return {key: 0 for key in USER_QUOTA_KEYS}
+
+
+def normalize_user_quotas(value):
+    if value is None:
+        return default_user_quotas()
+    if not isinstance(value, dict):
+        raise ValueError("用户配额格式无效")
+    quotas = default_user_quotas()
+    limits = {
+        "max_instances": MAX_USER_ASSIGNMENTS,
+        "cpu_percent": 100000,
+        "memory_bytes": 1024**5,
+        "disk_bytes": 1024**6,
+        "traffic_bytes": MAX_TRAFFIC_LIMIT_BYTES,
+    }
+    for key in USER_QUOTA_KEYS:
+        try:
+            quotas[key] = int(value.get(key, 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("用户配额必须是非负整数") from exc
+        if quotas[key] < 0 or quotas[key] > limits[key]:
+            raise ValueError(f"用户配额 {key} 超出允许范围")
+    return quotas
+
+
+def user_quota_usage(assignments, instances):
+    active_keys = {
+        key for key, expires_at in assignments.items()
+        if assignment_is_active(expires_at)
+    }
+    selected = [
+        item for item in instances
+        if f"{item.get('node', '')}/{item.get('name', '')}" in active_keys
+    ]
+    usage = default_user_quotas()
+    usage["max_instances"] = len(selected)
+    for instance in selected:
+        usage["cpu_percent"] += instance_cpu_commitment_percent(instance, 0)
+        usage["memory_bytes"] += parse_size_bytes(str(instance.get("memory", "")))
+        usage["disk_bytes"] += parse_size_bytes(str(instance.get("disk", "")))
+        usage["traffic_bytes"] += int(instance.get("traffic_limit_bytes", 0) or 0)
+    return usage
+
+
+def validate_user_quota(assignments, quotas, instances=None):
+    quotas = normalize_user_quotas(quotas)
+    if not any(quotas.values()):
+        return default_user_quotas()
+    if instances is None:
+        _, instances = overview()
+    usage = user_quota_usage(assignments, instances)
+    labels = {
+        "max_instances": "实例数量", "cpu_percent": "CPU 承诺",
+        "memory_bytes": "内存", "disk_bytes": "磁盘", "traffic_bytes": "月流量",
+    }
+    for key, limit in quotas.items():
+        if limit and usage[key] > limit:
+            raise ValueError(f"授权后的{labels[key]}用量 {usage[key]} 超过用户配额 {limit}")
+    return usage
+
+
+def _public_user(username, record, instances=None):
     assignments = [
         {
             "instance": key,
@@ -418,18 +490,25 @@ def _public_user(username, record):
         }
         for key, expires_at in sorted(assignment_map(record).items())
     ]
+    quotas = normalize_user_quotas(record.get("quotas"))
     return {
         "username": username,
         "enabled": bool(record.get("enabled", True)),
         "assignments": assignments,
         "created_at": str(record.get("created_at", "")),
+        "quotas": quotas,
+        "quota_usage": user_quota_usage(assignment_map(record), instances or []),
     }
 
 
 def list_user_accounts():
+    try:
+        _, instances = overview()
+    except Exception:
+        instances = []
     with USERS_LOCK:
         users = _read_users_unlocked()
-        return [_public_user(username, users[username]) for username in sorted(users)]
+        return [_public_user(username, users[username], instances) for username in sorted(users)]
 
 
 def get_user_account(username):
@@ -448,6 +527,7 @@ def create_user_account(username, password):
         **_password_record(str(password)),
         "enabled": True,
         "assignments": {},
+        "quotas": default_user_quotas(),
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     with USERS_LOCK:
@@ -482,7 +562,7 @@ def invalidate_user_sessions(username):
             SESSIONS.pop(token, None)
 
 
-def update_user_account(username, enabled=None, password=None, assignments=None):
+def update_user_account(username, enabled=None, password=None, assignments=None, quotas=None):
     username = str(username).lower()
     if enabled is not None and not isinstance(enabled, bool):
         raise ValueError("账户状态无效")
@@ -495,13 +575,32 @@ def update_user_account(username, enabled=None, password=None, assignments=None)
             record["enabled"] = bool(enabled)
         if password:
             record.update(_password_record(str(password)))
-        if assignments is not None:
-            record["assignments"] = normalize_assignments(assignments)
+        next_assignments = normalize_assignments(assignments) if assignments is not None else assignment_map(record)
+        next_quotas = normalize_user_quotas(quotas) if quotas is not None else normalize_user_quotas(record.get("quotas"))
+        validate_user_quota(next_assignments, next_quotas)
+        record["assignments"] = next_assignments
+        record["quotas"] = next_quotas
         users[username] = record
         _write_users_unlocked(users)
     if enabled is False or password:
         invalidate_user_sessions(username)
     return _public_user(username, record)
+
+
+def change_user_password(username, current_password, new_password):
+    username = str(username).lower()
+    new_password = str(new_password)
+    with USERS_LOCK:
+        users = _read_users_unlocked()
+        record = users.get(username)
+        if not isinstance(record, dict) or not account_password_matches(record, str(current_password)):
+            raise ValueError("当前密码错误")
+        if account_password_matches(record, new_password):
+            raise ValueError("新密码不能与当前密码相同")
+        record.update(_password_record(new_password))
+        users[username] = record
+        _write_users_unlocked(users)
+    invalidate_user_sessions(username)
 
 
 def delete_user_account(username):
@@ -1515,6 +1614,244 @@ def _write_private_json(path, data):
         except FileNotFoundError:
             pass
         raise
+
+
+def default_security_data():
+    return {"version": 1, "accounts": {}, "api_tokens": []}
+
+
+def read_security_data():
+    with SECURITY_LOCK:
+        data = _read_private_json(SECURITY_FILE, default_security_data())
+    if not isinstance(data.get("accounts"), dict):
+        data["accounts"] = {}
+    if not isinstance(data.get("api_tokens"), list):
+        data["api_tokens"] = []
+    return data
+
+
+def account_security(username):
+    data = read_security_data()
+    record = data["accounts"].get(str(username).lower(), {})
+    return {
+        "totp_enabled": bool(record.get("totp_enabled") and record.get("totp_secret")),
+        "totp_pending": bool(record.get("pending_totp_secret")),
+    }
+
+
+def _totp_secret():
+    return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+
+
+def totp_code(secret, timestamp=None):
+    text = str(secret).strip().upper()
+    padded = text + "=" * ((8 - len(text) % 8) % 8)
+    try:
+        key = base64.b32decode(padded, casefold=True)
+    except Exception as exc:
+        raise ValueError("TOTP 密钥无效") from exc
+    counter = int(timestamp if timestamp is not None else time.time()) // 30
+    digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return f"{value % 1000000:06d}"
+
+
+def verify_totp(secret, code, timestamp=None):
+    code = str(code).strip()
+    if not re.fullmatch(r"\d{6}", code):
+        return False
+    current = timestamp if timestamp is not None else time.time()
+    return any(hmac.compare_digest(totp_code(secret, current + offset * 30), code) for offset in (-1, 0, 1))
+
+
+def begin_totp_setup(username):
+    username = str(username).lower()
+    secret = _totp_secret()
+    with SECURITY_LOCK:
+        data = _read_private_json(SECURITY_FILE, default_security_data())
+        account = data.setdefault("accounts", {}).setdefault(username, {})
+        account["pending_totp_secret"] = secret
+        _write_private_json(SECURITY_FILE, data)
+    issuer = "Incus Control"
+    uri = f"otpauth://totp/{issuer}:{username}?secret={secret}&issuer={issuer}&digits=6&period=30"
+    return {"secret": secret, "otpauth_uri": uri}
+
+
+def confirm_totp_setup(username, code):
+    username = str(username).lower()
+    with SECURITY_LOCK:
+        data = _read_private_json(SECURITY_FILE, default_security_data())
+        account = data.setdefault("accounts", {}).setdefault(username, {})
+        secret = str(account.get("pending_totp_secret", ""))
+        if not secret or not verify_totp(secret, code):
+            raise ValueError("验证码无效，请确认服务器时间和验证器时间一致")
+        account.update({"totp_secret": secret, "totp_enabled": True})
+        account.pop("pending_totp_secret", None)
+        _write_private_json(SECURITY_FILE, data)
+    return account_security(username)
+
+
+def disable_totp(username, code):
+    username = str(username).lower()
+    with SECURITY_LOCK:
+        data = _read_private_json(SECURITY_FILE, default_security_data())
+        account = data.setdefault("accounts", {}).get(username, {})
+        secret = str(account.get("totp_secret", ""))
+        if not secret or not verify_totp(secret, code):
+            raise ValueError("二次验证码无效")
+        data["accounts"].pop(username, None)
+        _write_private_json(SECURITY_FILE, data)
+    return account_security(username)
+
+
+def verify_account_totp(username, code):
+    data = read_security_data()
+    account = data["accounts"].get(str(username).lower(), {})
+    secret = str(account.get("totp_secret", ""))
+    if not account.get("totp_enabled") or not secret:
+        return True
+    return verify_totp(secret, code)
+
+
+def public_api_tokens():
+    now = datetime.now(timezone.utc)
+    tokens = []
+    for item in read_security_data()["api_tokens"]:
+        try:
+            expires = datetime.fromisoformat(str(item.get("expires_at", "")).replace("Z", "+00:00"))
+        except ValueError:
+            expires = now - timedelta(seconds=1)
+        tokens.append({
+            "id": item.get("id", ""), "label": item.get("label", ""),
+            "scope": item.get("scope", "read"), "created_at": item.get("created_at", ""),
+            "expires_at": item.get("expires_at", ""), "last_used_at": item.get("last_used_at", ""),
+            "active": expires > now,
+        })
+    return tokens
+
+
+def create_api_token(label, scope="read", expires_days=90):
+    label = str(label).strip()
+    if not 1 <= len(label) <= 64:
+        raise ValueError("Token 名称长度必须在 1 到 64 个字符之间")
+    scope = str(scope)
+    if scope not in {"read", "write"}:
+        raise ValueError("Token 权限范围无效")
+    try:
+        expires_days = int(expires_days)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Token 有效期无效") from exc
+    if not 1 <= expires_days <= 365:
+        raise ValueError("Token 有效期必须在 1 到 365 天之间")
+    plaintext = "icp_" + secrets.token_urlsafe(32)
+    token_id = secrets.token_hex(8)
+    record = {
+        "id": token_id, "label": label, "scope": scope,
+        "token_hash": hashlib.sha256(plaintext.encode()).hexdigest(),
+        "created_at": utc_now(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=expires_days)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "last_used_at": "",
+    }
+    with SECURITY_LOCK:
+        data = _read_private_json(SECURITY_FILE, default_security_data())
+        tokens = data.setdefault("api_tokens", [])
+        if len(tokens) >= MAX_API_TOKENS:
+            raise ValueError(f"最多创建 {MAX_API_TOKENS} 个 API Token")
+        tokens.append(record)
+        _write_private_json(SECURITY_FILE, data)
+    return plaintext, {key: value for key, value in record.items() if key != "token_hash"}
+
+
+def revoke_api_token(token_id):
+    if not BACKUP_ID_RE.fullmatch(str(token_id)):
+        raise ValueError("Token 编号无效")
+    with SECURITY_LOCK:
+        data = _read_private_json(SECURITY_FILE, default_security_data())
+        before = len(data.setdefault("api_tokens", []))
+        data["api_tokens"] = [item for item in data["api_tokens"] if item.get("id") != token_id]
+        if len(data["api_tokens"]) == before:
+            raise ValueError("API Token 不存在")
+        _write_private_json(SECURITY_FILE, data)
+
+
+def authenticate_api_token(plaintext):
+    token_hash = hashlib.sha256(str(plaintext).encode()).hexdigest()
+    now = datetime.now(timezone.utc)
+    with SECURITY_LOCK:
+        data = _read_private_json(SECURITY_FILE, default_security_data())
+        for item in data.setdefault("api_tokens", []):
+            if not hmac.compare_digest(str(item.get("token_hash", "")), token_hash):
+                continue
+            try:
+                expires = datetime.fromisoformat(str(item.get("expires_at", "")).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if expires <= now:
+                return None
+            item["last_used_at"] = utc_now()
+            _write_private_json(SECURITY_FILE, data)
+            return {
+                "username": f"api:{item.get('label', 'token')}", "role": "admin",
+                "csrf": "", "expires": time.time() + 300,
+                "auth_type": "api_token", "scope": item.get("scope", "read"),
+            }
+    return None
+
+
+def default_metrics_data():
+    return {"version": 1, "nodes": {}}
+
+
+def record_metric_history(nodes, instances):
+    now = datetime.now(timezone.utc)
+    timestamp = int(now.timestamp())
+    by_node = {}
+    for instance in instances:
+        bucket = by_node.setdefault(instance["node"], {"rx": 0, "tx": 0, "running": 0})
+        bucket["rx"] += int(instance.get("network_rx_bytes", 0) or 0)
+        bucket["tx"] += int(instance.get("network_tx_bytes", 0) or 0)
+        bucket["running"] += instance.get("status") == "Running"
+    with METRICS_LOCK:
+        data = _read_private_json(METRICS_FILE, default_metrics_data())
+        history = data.setdefault("nodes", {})
+        cutoff = timestamp - METRICS_RETENTION_SECONDS
+        for node in nodes:
+            points = history.setdefault(node["name"], [])
+            points[:] = [point for point in points if int(point.get("time", 0)) >= cutoff]
+            if node.get("status") != "online" or (points and timestamp - int(points[-1].get("time", 0)) < METRICS_INTERVAL_SECONDS):
+                continue
+            network = by_node.get(node["name"], {"rx": 0, "tx": 0, "running": 0})
+            cpu_total = max(1, int(node.get("cpu", 0) or 1))
+            points.append({
+                "time": timestamp,
+                "load_percent": round(max(0, float(node.get("load", 0))) / cpu_total * 100, 2),
+                "memory_percent": round(int(node.get("memory_used", 0)) / max(1, int(node.get("memory", 0))) * 100, 2),
+                "disk_percent": round(int(node.get("disk_used", 0)) / max(1, int(node.get("disk", 0))) * 100, 2),
+                "instances": int(node.get("instance_count", 0)),
+                "running": int(network["running"]),
+                "rx_bytes": int(network["rx"]), "tx_bytes": int(network["tx"]),
+            })
+        _write_private_json(METRICS_FILE, data)
+
+
+def metrics_payload(node="", range_seconds=86400):
+    try:
+        range_seconds = int(range_seconds)
+    except (TypeError, ValueError):
+        range_seconds = 86400
+    range_seconds = max(3600, min(range_seconds, METRICS_RETENTION_SECONDS))
+    cutoff = int(time.time()) - range_seconds
+    with METRICS_LOCK:
+        data = _read_private_json(METRICS_FILE, default_metrics_data())
+    names = [node] if node else sorted(data.get("nodes", {}))
+    return {
+        "range_seconds": range_seconds,
+        "nodes": {
+            name: [point for point in data.get("nodes", {}).get(name, []) if int(point.get("time", 0)) >= cutoff]
+            for name in names if name in data.get("nodes", {})
+        },
+    }
 
 
 def utc_now():
@@ -2769,6 +3106,7 @@ def run_monitor_scan(force=False, traffic_only=False):
         try:
             nodes, instances = overview()
             update_traffic_usage(instances)
+            record_metric_history(nodes, instances)
             now_monotonic = time.monotonic()
             if force or now_monotonic - LAST_RECONCILE_AT >= RECONCILE_INTERVAL_SECONDS:
                 try:
@@ -4065,14 +4403,20 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}", flush=True)
 
+    def send_security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
     def send_json(self, status, payload, extra_headers=None):
         body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
+        self.send_security_headers()
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
@@ -4085,8 +4429,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
+        self.send_security_headers()
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
@@ -4102,7 +4445,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "public, max-age=86400")
-        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -4146,6 +4489,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def session(self):
         clean_sessions()
+        authorization = self.headers.get("Authorization", "")
+        if authorization.startswith("Bearer "):
+            plaintext = authorization[7:].strip()
+            return None, authenticate_api_token(plaintext) if plaintext.startswith("icp_") else None
         jar = cookies.SimpleCookie(self.headers.get("Cookie", ""))
         morsel = jar.get("incus_cn_session")
         if not morsel:
@@ -4166,9 +4513,14 @@ class Handler(BaseHTTPRequestHandler):
         if not session:
             self.send_json(401, {"error": "请先登录"})
             return None
-        if csrf and not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), session["csrf"]):
-            self.send_json(403, {"error": "安全令牌无效，请刷新页面重试"})
-            return None
+        if csrf:
+            if session.get("auth_type") == "api_token":
+                if session.get("scope") != "write":
+                    self.send_json(403, {"error": "该 API Token 只有只读权限"})
+                    return None
+            elif not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), session["csrf"]):
+                self.send_json(403, {"error": "安全令牌无效，请刷新页面重试"})
+                return None
         return token, session
 
     def require_admin(self, csrf=False):
@@ -4212,6 +4564,49 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 "panel_version": APP_VERSION,
             })
+            return
+        if path == "/api/account/security":
+            auth = self.require_auth()
+            if not auth:
+                return
+            payload = account_security(auth[1]["username"])
+            payload["api_tokens"] = public_api_tokens() if auth[1].get("role") == "admin" else []
+            self.send_json(200, {"security": payload})
+            return
+        if path == "/api/metrics":
+            auth = self.require_admin()
+            if not auth:
+                return
+            query = parse_qs(parsed_url.query)
+            self.send_json(200, metrics_payload(query.get("node", [""])[0], query.get("range", [86400])[0]))
+            return
+        if path.startswith("/api/v1/"):
+            auth = self.require_auth()
+            if not auth:
+                return
+            try:
+                if path == "/api/v1/health":
+                    payload = {"status": "ok", "version": APP_VERSION, "time": utc_now()}
+                elif path == "/api/v1/tasks":
+                    payload = {"tasks": list_tasks(auth[1])}
+                elif path == "/api/v1/metrics":
+                    if auth[1].get("role") != "admin":
+                        self.send_json(403, {"error": "需要管理员权限"})
+                        return
+                    query = parse_qs(parsed_url.query)
+                    payload = metrics_payload(query.get("node", [""])[0], query.get("range", [86400])[0])
+                elif path in {"/api/v1/nodes", "/api/v1/instances"}:
+                    overview_payload = overview_for_session(auth[1])
+                    if path == "/api/v1/nodes":
+                        payload = {"nodes": overview_payload["nodes"]}
+                    else:
+                        payload = {"instances": overview_payload["instances"]}
+                else:
+                    self.send_json(404, {"error": "API 版本接口不存在"})
+                    return
+                self.send_json(200, payload)
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
             return
         if path == "/api/overview":
             auth = self.require_auth()
@@ -4379,6 +4774,15 @@ class Handler(BaseHTTPRequestHandler):
                 attempts.append(time.time())
                 self.send_json(401, {"error": "用户名或密码错误"})
                 return
+            security = account_security(account["username"])
+            if security["totp_enabled"] and not verify_account_totp(account["username"], data.get("totp", "")):
+                if str(data.get("totp", "")).strip():
+                    attempts.append(time.time())
+                self.send_json(401, {
+                    "error": "请输入验证器中的 6 位动态验证码",
+                    "code": "totp_required", "totp_required": True,
+                })
+                return
             LOGIN_ATTEMPTS.pop(ip, None)
             token = secrets.token_urlsafe(32)
             csrf_token = secrets.token_urlsafe(24)
@@ -4404,9 +4808,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True}, {"Set-Cookie": "incus_cn_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"})
             return
         if path == "/api/account/password":
-            if auth[1].get("role") != "admin":
-                self.send_json(403, {"error": "需要管理员权限"})
-                return
             try:
                 data = self.read_json()
                 new_password = str(data.get("new_password", ""))
@@ -4414,8 +4815,13 @@ class Handler(BaseHTTPRequestHandler):
                     new_password, str(data.get("confirm_password", ""))
                 ):
                     raise ValueError("两次输入的新密码不一致")
-                change_admin_password(data.get("current_password", ""), new_password)
-                record_operation("admin_password_change", PANEL_USER, message="管理员密码已修改")
+                if auth[1].get("role") == "admin":
+                    change_admin_password(data.get("current_password", ""), new_password)
+                    operation = "admin_password_change"
+                else:
+                    change_user_password(auth[1]["username"], data.get("current_password", ""), new_password)
+                    operation = "user_password_change"
+                record_operation(operation, auth[1]["username"], message="账户密码已修改")
                 self.send_json(200, {
                     "ok": True,
                     "message": "密码修改成功，请使用新密码重新登录",
@@ -4426,6 +4832,40 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": str(exc)})
             except Exception as exc:
                 self.send_json(500, {"error": str(exc)})
+            return
+        if path == "/api/account/totp/setup":
+            try:
+                self.send_json(200, {"setup": begin_totp_setup(auth[1]["username"])})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path == "/api/account/totp/verify":
+            try:
+                security = confirm_totp_setup(auth[1]["username"], self.read_json().get("code", ""))
+                record_operation("totp_enable", auth[1]["username"], message="启用二次验证")
+                self.send_json(200, {"ok": True, "security": security})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path == "/api/account/totp/disable":
+            try:
+                security = disable_totp(auth[1]["username"], self.read_json().get("code", ""))
+                record_operation("totp_disable", auth[1]["username"], message="关闭二次验证")
+                self.send_json(200, {"ok": True, "security": security})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path == "/api/account/tokens":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                data = self.read_json()
+                plaintext, token = create_api_token(data.get("label", ""), data.get("scope", "read"), data.get("expires_days", 90))
+                record_operation("api_token_create", token["label"], message=f"权限 {token['scope']}")
+                self.send_json(201, {"ok": True, "token": token, "plaintext": plaintext})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
             return
         if path == "/api/system/update":
             if auth[1].get("role") != "admin":
@@ -4749,7 +5189,8 @@ class Handler(BaseHTTPRequestHandler):
                 enabled = data.get("enabled") if "enabled" in data else None
                 assignments = data.get("assignments") if "assignments" in data else None
                 password = str(data.get("password", ""))
-                user = update_user_account(username, enabled, password, assignments)
+                quotas = data.get("quotas") if "quotas" in data else None
+                user = update_user_account(username, enabled, password, assignments, quotas)
                 active_count = sum(item["active"] for item in user["assignments"])
                 record_operation("user_update", username, message=f"有效授权 {active_count} 台实例")
                 self.send_json(200, {"ok": True, "user": user})
@@ -4943,6 +5384,15 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         auth = self.require_admin(csrf=True)
         if not auth:
+            return
+        token_match = re.fullmatch(r"/api/account/tokens/([a-f0-9]{16})", path)
+        if token_match:
+            try:
+                revoke_api_token(token_match.group(1))
+                record_operation("api_token_revoke", token_match.group(1), message="撤销 API Token")
+                self.send_json(200, {"ok": True})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
             return
         user_match = re.fullmatch(r"/api/users/([a-zA-Z0-9][a-zA-Z0-9_.-]{2,31})", path)
         if user_match:
