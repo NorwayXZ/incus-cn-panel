@@ -36,13 +36,13 @@ class ValidationTests(unittest.TestCase):
             self.assertIn(marker, page)
 
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "2.4.0")
+        self.assertEqual(app.APP_VERSION, "2.5.0")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"2.4.1\n"
+        response.read.return_value = b"2.5.1\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "2.4.1")
+            self.assertEqual(app.fetch_latest_version(), "2.5.1")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -51,10 +51,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "2.4.1",
+            "status": "running", "target_version": "2.5.1",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "2.4.1")
+        self.assertEqual(payload["latest_version"], "2.5.1")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -70,7 +70,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("2.4.1")
+                    status = app.start_panel_update("2.5.1")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -78,7 +78,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "2.4.1")
+                self.assertEqual(saved["target_version"], "2.5.1")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -129,7 +129,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "2.4.0")
+                self.assertEqual(data["panel_version"], "2.5.0")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -280,6 +280,21 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(
             app.recommended_swap_bytes("1GiB", "4GiB", "virtual-machine"),
             0,
+        )
+
+    def test_available_node_memory_does_not_double_count_host_reserve(self):
+        mib = app.MIB_BYTES
+        self.assertEqual(
+            app.available_node_memory(512 * mib, 192 * mib, 192 * mib, 0, 256 * mib),
+            256 * mib,
+        )
+        self.assertEqual(
+            app.available_node_memory(512 * mib, 256 * mib, 128 * mib, 128 * mib, 256 * mib),
+            128 * mib,
+        )
+        self.assertEqual(
+            app.available_node_memory(512 * mib, 320 * mib, 320 * mib, 0, 256 * mib),
+            192 * mib,
         )
 
     def test_node_reserve_policy_can_use_128_mib_memory_floor(self):
@@ -1083,6 +1098,8 @@ class ValidationTests(unittest.TestCase):
         for label in ("高性能代理 · 1G", "大内存代理 · 2G", "自定义规格"):
             self.assertIn(label, app.HTML)
         self.assertIn('id="nodeSettingsDialog"', app.HTML)
+        self.assertIn('id="nodeReserveMemoryAvailable"', app.HTML)
+        self.assertIn("function syncNodeSettingsPreview", app.HTML)
         self.assertIn("dataset.nodeSettings", app.HTML)
         self.assertIn("node-reserve-edit", app.HTML)
         self.assertIn("点击编辑宿主机保留策略", app.HTML)
@@ -1355,6 +1372,7 @@ class ValidationTests(unittest.TestCase):
             {"driver": "dir"},
             {"space": {"total": 80 * app.GIB_BYTES, "used": 10 * app.GIB_BYTES}},
             {"managed": True},
+            [],
         ]
         with mock.patch("app.require_node", return_value="node-a"), \
              mock.patch("app.run_incus", side_effect=[json.dumps(item) for item in responses]), \
@@ -1365,6 +1383,37 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(report["capabilities"]["virtual_machines"])
         self.assertEqual(report["facts"]["storage_driver"], "dir")
 
+    def test_node_preflight_deducts_existing_instance_commitments(self):
+        responses = [
+            {"environment": {"server_version": "6.12"}, "config": {}},
+            {"cpu": {"total": 1}, "memory": {
+                "total": app.GIB_BYTES, "used": 256 * app.MIB_BYTES,
+            }},
+            {"driver": "dir"},
+            {"space": {"total": 10 * app.GIB_BYTES, "used": app.GIB_BYTES}},
+            {"managed": True},
+            [{
+                "name": "proxy-01", "type": "container", "status": "Stopped",
+                "expanded_config": {
+                    "limits.cpu": "1", "limits.cpu.allowance": "25ms/100ms",
+                    "limits.memory": "128MiB",
+                },
+                "expanded_devices": {
+                    "root": {"type": "disk", "path": "/", "size": "2GiB"},
+                },
+            }],
+        ]
+        with mock.patch("app.require_node", return_value="node-a"), \
+             mock.patch("app.run_incus", side_effect=[json.dumps(item) for item in responses]), \
+             mock.patch("app.save_node_health", side_effect=lambda report: report):
+            report = app.node_preflight("node-a")
+        capacity = next(
+            item for item in report["checks"] if item["code"] == "safe_capacity"
+        )
+        self.assertIn("CPU 60%", capacity["detail"])
+        self.assertIn("内存 640 MiB", capacity["detail"])
+        self.assertIn("磁盘 6.0 GiB", capacity["detail"])
+
     def test_node_preflight_separates_lxc_and_kvm_capabilities(self):
         responses = [
             {"environment": {"server_version": "6.12"},
@@ -1373,6 +1422,7 @@ class ValidationTests(unittest.TestCase):
             {"driver": "dir"},
             {"space": {"total": 20 * app.GIB_BYTES, "used": 2 * app.GIB_BYTES}},
             {"managed": True},
+            [],
         ]
         with mock.patch("app.require_node", return_value="node-a"), \
              mock.patch("app.run_incus", side_effect=[json.dumps(item) for item in responses]), \
@@ -1392,11 +1442,12 @@ class ValidationTests(unittest.TestCase):
         responses = [
             {"environment": {"server_version": "6.12"}, "config": {}},
             {"cpu": {"total": 1}, "memory": {
-                "total": 512 * app.MIB_BYTES, "used": 320 * app.MIB_BYTES,
+                "total": 512 * app.MIB_BYTES, "used": 400 * app.MIB_BYTES,
             }},
             {"driver": "dir"},
             {"space": {"total": 4 * app.GIB_BYTES, "used": app.GIB_BYTES}},
             {"managed": True},
+            [],
         ]
         with mock.patch("app.require_node", return_value="node-a"), \
              mock.patch("app.run_incus", side_effect=[json.dumps(item) for item in responses]), \
@@ -1696,7 +1747,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(node["cpu_committed_percent"], 100)
         self.assertEqual(node["cpu_available_percent"], 240)
         self.assertEqual(node["memory_reserve"], 512 * 1024**2)
-        self.assertEqual(node["available_memory"], 2 * 1024**3)
+        self.assertEqual(node["available_memory"], 5 * 512 * 1024**2)
         self.assertEqual(node["disk_reserve"], 2 * 1024**3)
         self.assertEqual(node["available_disk"], 13 * 1024**3)
 

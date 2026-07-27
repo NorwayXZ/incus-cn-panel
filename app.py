@@ -1092,6 +1092,19 @@ def host_cpu_budget_percent(cpu_total, reserve_percent=15):
     return cpu_total * (100 - reserve_percent)
 
 
+def available_node_memory(
+    total, used, host_used, instance_committed, reserve,
+):
+    total = max(0, int(total or 0))
+    used = max(0, int(used or 0))
+    host_used = max(0, int(host_used or 0))
+    instance_committed = max(0, int(instance_committed or 0))
+    reserve = max(0, int(reserve or 0))
+    host_floor = max(host_used, reserve)
+    committed = max(used, host_floor + instance_committed)
+    return max(0, total - committed)
+
+
 def default_node_settings_data():
     return {"version": 1, "nodes": {}}
 
@@ -1460,7 +1473,6 @@ def inspect_node(name, remote):
         host_memory_used = max(0, memory_used - instance_memory_used)
         reserve_policy = effective_node_reserves(name, memory_total, disk_total, cpu_total)
         memory_reserve = reserve_policy["memory_reserve_bytes"]
-        memory_committed = max(memory_used, host_memory_used + allocations["memory"])
         disk_reserve = reserve_policy["disk_reserve_bytes"]
         disk_committed = max(disk_used, allocations["disk"])
         cpu_budget_percent = host_cpu_budget_percent(
@@ -1498,8 +1510,9 @@ def inspect_node(name, remote):
             "allocated_memory": allocations["memory"],
             "allocated_disk": allocations["disk"],
             "available_cpu": cpu_available_percent / 100,
-            "available_memory": max(
-                0, memory_total - memory_committed - memory_reserve
+            "available_memory": available_node_memory(
+                memory_total, memory_used, host_memory_used,
+                allocations["memory"], memory_reserve,
             ),
             "available_disk": max(0, disk_total - disk_committed - disk_reserve),
             "available_ssh_ports": sum(
@@ -2326,6 +2339,9 @@ def node_preflight(node, probe=False):
             run_incus("query", f"{node}:/1.0/storage-pools/default/resources", timeout=20)
         )
         network = json.loads(run_incus("query", f"{node}:/1.0/networks/incusbr0", timeout=20))
+        raw_instances = json.loads(
+            run_incus("list", f"{node}:", "--format=json", timeout=20)
+        )
     except Exception as exc:
         report = {
             "node": node, "status": "failed", "score": 0, "checked_at": checked_at,
@@ -2360,6 +2376,13 @@ def node_preflight(node, probe=False):
     disk_total = int(space.get("total", 0) or 0)
     disk_used = int(space.get("used", 0) or 0)
     disk_free = max(0, disk_total - disk_used)
+    instances = parse_instances(node, raw_instances)
+    allocations = allocation_summary(instances, memory_total, cpu_total)
+    instance_memory_used = sum(
+        int(instance.get("memory_used_bytes", 0) or 0)
+        for instance in instances
+    )
+    host_memory_used = max(0, memory_used - instance_memory_used)
     version = str(environment.get("server_version", "未知"))
     add("api", "Incus API", "passed", f"Incus {version} 响应正常")
     add(
@@ -2387,12 +2410,17 @@ def node_preflight(node, probe=False):
     )
     reserve_policy = effective_node_reserves(node, memory_total, disk_total, cpu_total)
     cpu_budget = host_cpu_budget_percent(cpu_total, reserve_policy["cpu_reserve_percent"])
-    memory_available = max(
-        0, memory_total - memory_used - reserve_policy["memory_reserve_bytes"]
+    cpu_available = max(0, cpu_budget - allocations["cpu_commitment_percent"])
+    memory_available = available_node_memory(
+        memory_total, memory_used, host_memory_used,
+        allocations["memory"], reserve_policy["memory_reserve_bytes"],
     )
-    disk_available = max(0, disk_free - reserve_policy["disk_reserve_bytes"])
+    disk_committed = max(disk_used, allocations["disk"])
+    disk_available = max(
+        0, disk_total - disk_committed - reserve_policy["disk_reserve_bytes"]
+    )
     light_capacity_ready = (
-        cpu_budget >= 25
+        cpu_available >= 25
         and memory_available >= 128 * MIB_BYTES
         and disk_available >= 2 * GIB_BYTES
     )
@@ -2400,7 +2428,7 @@ def node_preflight(node, probe=False):
         "safe_capacity", "最小实例安全容量",
         "passed" if light_capacity_ready else "failed",
         (
-            f"保留宿主资源后可分配 CPU {cpu_budget}%、内存 {format_bytes(memory_available)}、"
+            f"扣除宿主保留和已有实例后可分配 CPU {cpu_available}%、内存 {format_bytes(memory_available)}、"
             f"磁盘 {format_bytes(disk_available)}"
         ),
         "在宿主机保留策略中合理下调保留值，或释放宿主机内存和磁盘后重试"
@@ -2418,7 +2446,7 @@ def node_preflight(node, probe=False):
     kvm_value = str(config.get("user.incus-cn-panel.kvm", "unknown")).lower()
     vm_marker_ready = kvm_value == "true"
     vm_capacity_ready = (
-        cpu_budget >= 100
+        cpu_available >= 100
         and memory_available >= 512 * MIB_BYTES
         and disk_available >= 2 * GIB_BYTES
     )
@@ -2447,7 +2475,7 @@ def node_preflight(node, probe=False):
     reasons = [item["detail"] for item in checks if item["status"] == "failed"]
     memory_capacity = memory_available // (128 * MIB_BYTES)
     disk_capacity = disk_available // (2 * GIB_BYTES)
-    cpu_capacity = cpu_budget // 25
+    cpu_capacity = cpu_available // 25
     eligible = not failed and (probe_verified if probe else True)
     estimated_light_instances = min(memory_capacity, disk_capacity, cpu_capacity) if eligible else 0
     admission_summary = (
