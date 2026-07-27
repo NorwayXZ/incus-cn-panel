@@ -226,22 +226,61 @@
     .summary-row { display:flex; justify-content:space-between; gap:12px; padding:11px 0; border-bottom:1px solid #eaecf0; }
     .summary-row span { color:var(--muted); }
     .summary .btn { width:100%; margin-top:16px; }
-    .node-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(520px,100%),1fr)); gap:14px; align-items:stretch; }
-    .node-card { min-width:0; display:flex; flex-direction:column; padding:17px; background:#fff; border:1px solid var(--line); border-radius:7px; }
-    .node-card-head { display:flex; justify-content:space-between; gap:10px; margin-bottom:14px; }
-    .node-card h3 { margin:0 0 3px; font-size:15px; }
-    .node-live-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); margin:0 -17px 15px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:#f9fafb; }
-    .node-live-stat { min-width:0; padding:13px 12px; border-right:1px solid var(--line); }
-    .node-live-stat:last-child { border-right:0; }
-    .node-live-label { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:11px; }
-    .node-live-label svg { width:14px; height:14px; }
-    .node-live-stat strong { display:block; margin-top:5px; font-size:16px; overflow-wrap:anywhere; }
-    .node-live-stat small { display:block; margin-top:2px; color:var(--muted); font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .node-resource-stack { display:grid; gap:12px; margin-bottom:15px; }
-    .node-facts { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; padding:14px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
-    .node-facts span { display:block; color:var(--muted); font-size:11px; }
-    .node-facts strong { display:block; margin-top:3px; }
-    .node-card-foot { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:auto; padding-top:14px; }
+    .node-grid { display:grid; gap:18px; }
+    .node-card { min-width:0; overflow:hidden; background:#fff; border:1px solid var(--line); border-radius:7px; }
+    .node-card-head { min-height:68px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 18px; border-bottom:1px solid var(--line); }
+    .node-identity { min-width:0; display:flex; align-items:center; gap:11px; }
+    .node-identity-icon { width:38px; height:38px; display:grid; place-items:center; flex:none; color:var(--blue); background:var(--blue-soft); border-radius:6px; }
+    .node-identity-icon svg { width:20px; height:20px; }
+    .node-card h3 { margin:0 0 2px; font-size:16px; }
+    .node-address { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .node-head-actions { display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:7px; }
+    .node-board { display:grid; grid-template-columns:minmax(260px,.9fr) minmax(0,2.1fr); gap:1px; background:var(--line); }
+    .node-health { min-width:0; display:flex; flex-direction:column; justify-content:space-between; gap:20px; padding:22px; background:#fff; }
+    .node-health-title { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .node-health-title span { color:var(--muted); font-size:11px; }
+    .node-health-score { display:grid; grid-template-columns:92px minmax(0,1fr); align-items:center; gap:18px; }
+    .health-ring { --health:100; --health-color:var(--green); width:92px; aspect-ratio:1; display:grid; place-items:center; border-radius:50%; background:conic-gradient(var(--health-color) calc(var(--health)*1%),#e7ded2 0); }
+    .health-ring::before { content:""; width:72px; aspect-ratio:1; grid-area:1/1; border-radius:50%; background:#fff; }
+    .health-ring-inner { position:relative; z-index:1; grid-area:1/1; text-align:center; }
+    .health-ring-inner strong,.health-ring-inner small { display:block; }
+    .health-ring-inner strong { font-size:24px; line-height:1; }
+    .health-ring-inner small { margin-top:5px; color:var(--muted); font-size:9px; }
+    .node-health-copy strong,.node-health-copy span { display:block; }
+    .node-health-copy strong { font-size:18px; }
+    .node-health-copy span { margin-top:5px; color:var(--muted); font-size:11px; }
+    .node-health-facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px; overflow:hidden; background:var(--line); border:1px solid var(--line); border-radius:4px; }
+    .node-health-fact { min-width:0; padding:10px 11px; background:#f9fafb; }
+    .node-health-fact span,.node-health-fact strong { display:block; }
+    .node-health-fact span { color:var(--muted); font-size:10px; }
+    .node-health-fact strong { margin-top:3px; font-size:12px; overflow-wrap:anywhere; }
+    .node-analysis { min-width:0; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; background:var(--line); }
+    .node-analysis-card { min-width:0; min-height:156px; padding:17px; background:#fff; }
+    .node-analysis-card.cpu-card { grid-column:span 2; }
+    .node-analysis-card.network-card { grid-column:span 2; }
+    .node-analysis-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; }
+    .node-analysis-title { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:11px; }
+    .node-analysis-title svg { width:15px; height:15px; color:var(--blue); }
+    .node-analysis-head > strong { font-size:16px; }
+    .node-budget-line { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
+    .node-budget-line span,.node-budget-line strong { display:block; }
+    .node-budget-line span { color:var(--muted); font-size:9px; }
+    .node-budget-line strong { margin-top:3px; font-size:13px; overflow-wrap:anywhere; }
+    .node-progress { margin:15px 0 8px; }
+    .node-progress-meta { display:flex; justify-content:space-between; gap:10px; margin-bottom:6px; color:var(--muted); font-size:10px; }
+    .node-analysis-note { color:var(--muted); font-size:10px; }
+    .node-network-values { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:13px; }
+    .node-network-value { min-width:0; padding-left:11px; border-left:2px solid var(--blue); }
+    .node-network-value.upload { border-left-color:var(--green); }
+    .node-network-value span,.node-network-value strong,.node-network-value small { display:block; }
+    .node-network-value span { color:var(--muted); font-size:10px; }
+    .node-network-value strong { margin-top:4px; font-size:16px; overflow-wrap:anywhere; }
+    .node-network-value small { margin-top:2px; color:var(--muted); font-size:9px; }
+    .node-state-strip { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:1px; background:var(--line); border-top:1px solid var(--line); }
+    .node-state-item { min-width:0; padding:13px 17px; background:#f9fafb; }
+    .node-state-item span,.node-state-item strong { display:block; }
+    .node-state-item span { color:var(--muted); font-size:10px; }
+    .node-state-item strong { margin-top:3px; font-size:13px; overflow-wrap:anywhere; }
     .live-refresh-state { min-height:32px; display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; }
     .live-refresh-dot { width:7px; height:7px; border-radius:50%; background:var(--green); animation:live-refresh-pulse 1.6s ease-in-out infinite; }
     .live-refresh-state.failed .live-refresh-dot { background:var(--red); animation:none; }
@@ -323,8 +362,14 @@
       .workspace { margin-left:0; padding:76px 12px 84px; } .page-head { display:block; } .page-actions { margin-top:12px; }
       .metrics { gap:9px; } .metric { min-height:112px; padding:14px; } .metric strong { font-size:22px; }
       .node-grid,.image-catalog { grid-template-columns:1fr; } .grid2,.grid3,.grid4,.port-grid,.access-grid,.capacity-strip { grid-template-columns:1fr; } .form-section { padding:17px 14px; }
-      .node-live-grid,.node-facts { grid-template-columns:repeat(2,minmax(0,1fr)); }
-      .node-live-stat:nth-child(2) { border-right:0; } .node-live-stat:nth-child(-n+2) { border-bottom:1px solid var(--line); }
+      .node-card-head { align-items:flex-start; } .node-head-actions { max-width:230px; }
+      .node-board { grid-template-columns:1fr; }
+      .node-health { min-height:auto; }
+      .node-analysis { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .node-analysis-card.cpu-card { grid-column:1 / -1; }
+      .node-analysis-card.network-card { grid-column:1 / -1; }
+      .node-state-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .node-state-item:last-child { grid-column:1 / -1; }
       #singlePortCustom,#batchPortCustom,#trafficCustom { display:contents; }
       .capacity-strip:not(.capacity-strip-four) .capacity-item:last-child { grid-column:auto; }
       .filters { align-items:stretch; flex-direction:column; } .filters input,.filters select { width:100%; }
@@ -338,6 +383,12 @@
       table { min-width:820px; } .dashboard-grid table { min-width:640px; }
     }
     @media (max-width:360px) { .nav-item { font-size:7px; } }
+    @media (max-width:520px) {
+      .node-card-head { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; }
+      .node-head-actions { width:100%; max-width:none; justify-content:flex-start; }
+      .node-analysis { grid-template-columns:minmax(0,1fr); }
+      .node-analysis-card.cpu-card,.node-analysis-card.network-card { grid-column:auto; }
+    }
 
     /* Editorial operations theme inspired by the supplied reference. */
     :root {
@@ -703,12 +754,12 @@
               <header class="form-section-head"><span class="section-index">02</span><div><h2>计算与存储规格</h2><p>先配置常用资源，再按需展开高级磁盘性能限制</p></div><span class="section-badge">单机规格</span></header>
               <div class="form-section-content">
                 <div class="spec-grid">
-                  <div class="field"><label for="cpu">可用 vCPU</label><input id="cpu" type="number" min="1" max="128" value="1" required></div>
-                  <div id="cpuAllowanceField" class="field"><label for="cpuAllowance">CPU 硬上限</label><div class="input-unit cpu-allowance-control"><input id="cpuAllowance" type="number" min="1" max="12800" value="100" required><select disabled><option>100% = 1 核</option></select></div></div>
+                  <div class="field"><label for="cpu">最多并行 vCPU</label><input id="cpu" type="number" min="1" max="128" value="1" required></div>
+                  <div id="cpuAllowanceField" class="field"><label for="cpuAllowance">最大持续算力</label><div class="input-unit cpu-allowance-control"><input id="cpuAllowance" type="number" min="1" max="12800" value="100" required><select disabled><option>100% = 1 核</option></select></div></div>
                   <div class="field"><label for="memoryValue">内存</label><div class="input-unit"><input id="memoryValue" type="number" min="64" value="256" required><select id="memoryUnit"><option value="MiB">MiB</option><option value="GiB">GiB</option></select></div></div>
                   <div class="field"><label for="diskValue">系统盘</label><div class="input-unit"><input id="diskValue" type="number" min="1" value="2" required><select id="diskUnit"><option value="GiB">GiB</option><option value="MiB">MiB</option></select></div></div>
                 </div>
-                <p id="cpuPolicyNote" class="configuration-note cpu-policy-note"><i data-lucide="gauge"></i><span id="cpuPolicyText">1 个可用 vCPU，CPU 硬上限 100%，约等于 1 核持续算力</span></p>
+                <p id="cpuPolicyNote" class="configuration-note cpu-policy-note"><i data-lucide="gauge"></i><span id="cpuPolicyText">最多并行使用 1 个 CPU 线程，持续算力不超过 1 核</span></p>
                 <p id="swapPolicyNote" class="configuration-note"><i data-lucide="database-zap"></i><span id="swapPolicyText">LXC 将根据内存和系统盘自动配置 Swap 上限</span></p>
                 <div class="resource-impact"><div class="impact-item"><span>本次内存占用</span><strong id="impactMemory">-</strong></div><div class="impact-item"><span>创建后剩余内存</span><strong id="remainingMemory">-</strong></div><div class="impact-item"><span>本次磁盘占用</span><strong id="impactDisk">-</strong></div><div class="impact-item"><span>创建后剩余磁盘</span><strong id="remainingDisk">-</strong></div></div>
                 <details class="advanced-options"><summary><span><i data-lucide="settings-2"></i>高级磁盘性能</span><small>默认继承宿主机最大性能</small></summary><div class="advanced-options-body grid2"><div class="field limit-field"><label for="readIopsMode">读取 IOPS</label><select id="readIopsMode"><option value="unlimited">宿主机最大（不限制）</option><option value="custom">自定义限制</option></select><div id="readIopsCustom" class="input-unit hidden"><input id="readIops" type="number" min="1" max="1000000" value="100"><select disabled><option>IOPS</option></select></div></div><div class="field limit-field"><label for="writeIopsMode">写入 IOPS</label><select id="writeIopsMode"><option value="unlimited">宿主机最大（不限制）</option><option value="custom">自定义限制</option></select><div id="writeIopsCustom" class="input-unit hidden"><input id="writeIops" type="number" min="1" max="1000000" value="100"><select disabled><option>IOPS</option></select></div></div></div></details>
@@ -825,7 +876,21 @@
     function actionText(value){return({node_add:'添加宿主机',node_remove:'移除宿主机',instance_create:'创建实例',instance_batch_create:'批量创建实例',instance_access:'配置 SSH',instance_start:'启动实例',instance_stop:'停止实例',instance_restart:'重启实例',instance_delete:'删除实例',instance_traffic_update:'调整流量配额',instance_traffic_stop:'流量超额停机',image_copy:'预拉取镜像',image_upload:'导入镜像',image_delete:'删除镜像',user_create:'创建用户',user_update:'更新用户授权',user_delete:'删除用户',notification_config:'更新异常通知',admin_password_change:'修改管理员密码',panel_update:'更新控制面板'})[value]||value;}
     function operationItem(op){return `<div class="log-item"><span class="log-dot ${op.status==='failed'?'failed':''}"></span><div><strong>${esc(actionText(op.action))} · ${esc(op.target)}</strong><small>${esc(op.node||'控制端')}${op.message?' · '+esc(op.message):''}</small></div><small>${new Date(op.time).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}</small></div>`;}
     function renderDashboard(){const online=cluster.nodes.filter(x=>x.status==='online');const running=cluster.instances.filter(x=>x.status==='Running');const memTotal=online.reduce((n,x)=>n+x.memory,0),memUsed=online.reduce((n,x)=>n+x.memory_used,0),disk=online.reduce((n,x)=>n+x.disk,0);$('metricNodes').textContent=cluster.nodes.length;$('metricNodesSub').textContent=`${online.length} 在线 / ${cluster.nodes.length-online.length} 离线`;$('metricInstances').textContent=cluster.instances.length;$('metricInstancesSub').textContent=`${running.length} 运行 / ${cluster.instances.length-running.length} 停止`;$('metricMemory').textContent=bytes(memTotal);$('metricMemorySub').textContent=memTotal?`宿主机已用 ${pct(memUsed,memTotal)}%`:'暂无数据';$('metricDisk').textContent=bytes(disk);$('dashboardNodeEmpty').classList.toggle('hidden',cluster.nodes.length!==0);$('dashboardNodeRows').innerHTML=cluster.nodes.map(x=>`<tr><td><strong>${esc(x.name)}</strong><div class="mono muted">${esc(x.address)}</div></td><td><span class="status ${x.status}">${statusText(x.status)}</span></td><td>${x.status==='online'?x.load.toFixed(2):'-'}</td><td class="resource-cell">${x.status==='online'?`<div class="resource-meta"><span>${bytes(x.memory_used)}</span><span>${pct(x.memory_used,x.memory)}%</span></div><div class="bar"><span style="width:${pct(x.memory_used,x.memory)}%"></span></div>`:'-'}</td><td>${x.instance_count}</td></tr>`).join('');$('recentLogs').innerHTML=cluster.operations.length?cluster.operations.slice(0,6).map(operationItem).join(''):'<div class="empty">暂无操作记录</div>';}
-    function renderNodes(){$('nodeEmpty').classList.toggle('hidden',cluster.nodes.length!==0);$('nodeGrid').innerHTML=cluster.nodes.map(x=>{const live=nodeLiveSamples.get(x.name)||{},state=live.status||x.status,online=state==='online',memory=live.memory??x.memory,memoryUsed=live.memory_used??x.memory_used,disk=live.disk??x.disk,diskUsed=live.disk_used??x.disk_used,ready=!!live.sample_ready,cpuValue=online?(ready?Number(live.instance_cpu_percent||0).toFixed(1)+'%':'计算中'):'-',rxValue=online?(ready?speed(live.network_rx_bytes_per_second):'计算中'):'-',txValue=online?(ready?speed(live.network_tx_bytes_per_second):'计算中'):'-',instances=live.instance_count??x.instance_count;return `<article class="node-card"><div class="node-card-head"><div><h3>${esc(x.name)}</h3><div class="mono muted">${esc(x.address)}</div></div><span class="status ${state}">${statusText(state)}</span></div><div class="node-live-grid"><div class="node-live-stat" title="所有运行实例占宿主机总 CPU 的实时比例"><span class="node-live-label"><i data-lucide="cpu"></i>实例 CPU</span><strong>${cpuValue}</strong><small>${online?`1 分钟负载 ${Number(live.load??x.load??0).toFixed(2)} / ${live.cpu??x.cpu} 核`:'宿主机不可达'}</small></div><div class="node-live-stat"><span class="node-live-label"><i data-lucide="memory-stick"></i>宿主机内存</span><strong>${online?pct(memoryUsed,memory)+'%':'-'}</strong><small>${online?bytes(memoryUsed)+' / '+bytes(memory):'宿主机不可达'}</small></div><div class="node-live-stat" title="所有实例网卡每秒接收流量合计"><span class="node-live-label"><i data-lucide="arrow-down-to-line"></i>实例下载</span><strong>${rxValue}</strong><small>实时接收速率</small></div><div class="node-live-stat" title="所有实例网卡每秒发送流量合计"><span class="node-live-label"><i data-lucide="arrow-up-from-line"></i>实例上传</span><strong>${txValue}</strong><small>实时发送速率</small></div></div><div class="node-resource-stack"><div class="resource-cell"><div class="resource-meta"><span>内存使用</span><span>${online?bytes(memoryUsed)+' / '+bytes(memory):'-'}</span></div><div class="bar"><span style="width:${online?pct(memoryUsed,memory):0}%"></span></div></div><div class="resource-cell"><div class="resource-meta"><span>存储池使用</span><span>${online?bytes(diskUsed)+' / '+bytes(disk):'-'}</span></div><div class="bar"><span style="width:${online?pct(diskUsed,disk):0}%;background:var(--amber)"></span></div></div></div><div class="node-facts"><div><span>可分配 CPU</span><strong>${online?x.available_cpu+' / '+x.cpu+' 核':'-'}</strong></div><div><span>可分配内存</span><strong>${online?bytes(x.available_memory):'-'}</strong></div><div><span>可分配磁盘</span><strong>${online?bytes(x.available_disk):'-'}</strong></div><div><span>实例数量</span><strong>${online?instances:'-'}</strong></div></div><div class="node-card-foot"><button class="btn small" data-go="instances"><i data-lucide="list"></i>查看实例</button><button class="btn small danger" data-remove-node="${esc(x.name)}"><i data-lucide="unlink"></i>移除</button></div></article>`;}).join('');icons();}
+    function renderNodes(){
+      $('nodeEmpty').classList.toggle('hidden',cluster.nodes.length!==0);
+      $('nodeGrid').innerHTML=cluster.nodes.map(x=>{
+        const live=nodeLiveSamples.get(x.name)||{},state=live.status||x.status,online=state==='online';
+        const memory=Number(live.memory??x.memory??0),memoryUsed=Number(live.memory_used??x.memory_used??0),disk=Number(live.disk??x.disk??0),diskUsed=Number(live.disk_used??x.disk_used??0),cpuTotal=Number(live.cpu??x.cpu??0),load=Number(live.load??x.load??0);
+        const ready=!!live.sample_ready,cpuUse=ready?Number(live.instance_cpu_percent||0):0,rx=ready?speed(live.network_rx_bytes_per_second):'计算中',tx=ready?speed(live.network_tx_bytes_per_second):'计算中';
+        const totalInstances=Number(live.instance_count??x.instance_count??0),running=Number(live.running_instance_count??cluster.instances.filter(instance=>instance.node===x.name&&instance.status==='Running').length),stopped=Number(live.stopped_instance_count??Math.max(0,totalInstances-running));
+        const budget=Number(x.cpu_budget_percent||0)/100,committed=Number(x.cpu_committed_percent||0)/100,available=Number(x.cpu_available_percent||0)/100,reserved=Math.max(0,cpuTotal-budget),cpuBudgetUse=budget?Math.min(100,Math.round(committed/budget*100)):0;
+        const memoryUse=pct(memoryUsed,memory),diskUse=pct(diskUsed,disk),pressure=Math.max(cpuUse,memoryUse,diskUse,cpuTotal?load/cpuTotal*100:0),health=online?Math.max(0,Math.round(100-pressure*.15-Math.max(0,pressure-65)*.8)):0;
+        const healthLabel=!online?'离线':health>=85?'健康':health>=65?'需关注':'高负载',healthColor=!online?'#81758c':health>=85?'var(--green)':health>=65?'var(--amber)':'var(--red)';
+        const value=value=>online?value:'-';
+        return `<article class="node-card"><header class="node-card-head"><div class="node-identity"><span class="node-identity-icon"><i data-lucide="server"></i></span><div><h3>${esc(x.name)}</h3><div class="node-address mono muted">${esc(x.address)}</div></div></div><div class="node-head-actions"><span class="status ${state}">${statusText(state)}</span><button class="btn small" data-go="instances"><i data-lucide="list"></i>实例</button><button class="btn icon small danger" title="从面板移除宿主机" aria-label="从面板移除宿主机" data-remove-node="${esc(x.name)}"><i data-lucide="unlink"></i></button></div></header><div class="node-board"><section class="node-health"><div><div class="node-health-title"><strong>运行健康</strong><span>${ready?'实时采样':'等待第二次采样'}</span></div><div class="node-health-score"><div class="health-ring" style="--health:${health};--health-color:${healthColor}"><div class="health-ring-inner"><strong>${value(health)}</strong><small>健康分</small></div></div><div class="node-health-copy"><strong style="color:${healthColor}">${healthLabel}</strong><span>${online?`实例实时 CPU ${ready?cpuUse.toFixed(1)+'%':'计算中'}`:'宿主机当前不可达'}</span></div></div></div><div class="node-health-facts"><div class="node-health-fact"><span>1 分钟负载</span><strong>${value(load.toFixed(2))}</strong></div><div class="node-health-fact"><span>物理核心</span><strong>${value(cpuTotal+' 核')}</strong></div><div class="node-health-fact"><span>运行实例</span><strong>${value(running+' 台')}</strong></div><div class="node-health-fact"><span>系统架构</span><strong>${value(esc(x.architecture||'未知'))}</strong></div></div></section><div class="node-analysis"><section class="node-analysis-card cpu-card"><div class="node-analysis-head"><span class="node-analysis-title"><i data-lucide="cpu"></i>CPU 安全预算</span><strong>${value(formatCpuCores(available))} 核可分配</strong></div><div class="node-budget-line"><div><span>宿主机总量</span><strong>${value(formatCpuCores(cpuTotal))} 核</strong></div><div><span>宿主机保留</span><strong>${value(formatCpuCores(reserved))} 核</strong></div><div><span>实例已承诺</span><strong>${value(formatCpuCores(committed))} 核</strong></div><div><span>安全池剩余</span><strong>${value(formatCpuCores(available))} 核</strong></div></div><div class="node-progress"><div class="node-progress-meta"><span>安全池承诺进度</span><span>${value(cpuBudgetUse+'%')}</span></div><div class="bar"><span style="width:${online?cpuBudgetUse:0}%;background:${cpuBudgetUse>=90?'var(--red)':cpuBudgetUse>=75?'var(--amber)':'var(--blue)'}"></span></div></div><div class="node-analysis-note">所有实例按最大持续算力计账，合计不会超过 ${value(formatCpuCores(budget))} 核安全池。</div></section><section class="node-analysis-card"><div class="node-analysis-head"><span class="node-analysis-title"><i data-lucide="memory-stick"></i>内存</span><strong>${value(memoryUse)}%</strong></div><div class="resource-meta"><span>当前使用</span><span>${value(bytes(memoryUsed)+' / '+bytes(memory))}</span></div><div class="bar"><span style="width:${online?memoryUse:0}%"></span></div><div class="node-budget-line" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-top:17px"><div><span>宿主机保留</span><strong>${value(bytes(x.memory_reserve||0))}</strong></div><div><span>还能分配</span><strong>${value(bytes(x.available_memory||0))}</strong></div></div></section><section class="node-analysis-card"><div class="node-analysis-head"><span class="node-analysis-title"><i data-lucide="hard-drive"></i>存储池</span><strong>${value(diskUse)}%</strong></div><div class="resource-meta"><span>当前使用</span><span>${value(bytes(diskUsed)+' / '+bytes(disk))}</span></div><div class="bar"><span style="width:${online?diskUse:0}%;background:var(--amber)"></span></div><div class="node-budget-line" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-top:17px"><div><span>宿主机保留</span><strong>${value(bytes(x.disk_reserve||0))}</strong></div><div><span>还能分配</span><strong>${value(bytes(x.available_disk||0))}</strong></div></div></section><section class="node-analysis-card network-card"><div class="node-analysis-head"><span class="node-analysis-title"><i data-lucide="activity"></i>实例网络</span><strong>${ready?'实时':'采样中'}</strong></div><div class="node-network-values"><div class="node-network-value"><span>下载</span><strong>${value(rx)}</strong><small>全部实例合计</small></div><div class="node-network-value upload"><span>上传</span><strong>${value(tx)}</strong><small>全部实例合计</small></div></div></section></div></div><footer class="node-state-strip"><div class="node-state-item"><span>实例总数</span><strong>${value(totalInstances+' 台')}</strong></div><div class="node-state-item"><span>运行 / 停止</span><strong>${value(running+' / '+stopped)}</strong></div><div class="node-state-item"><span>可用 SSH 端口</span><strong>${value(Number(x.available_ssh_ports||0)+' 个')}</strong></div><div class="node-state-item"><span>已转发业务端口</span><strong>${value(Number(x.forwarded_ports||0)+' 个')}</strong></div><div class="node-state-item"><span>资源策略</span><strong>${online?'严格不超配':'-'}</strong></div></footer></article>`;
+      }).join('');
+      icons();
+    }
     function nodeHost(name){const address=cluster.nodes.find(x=>x.name===name)?.address||'';try{return new URL(address).hostname;}catch{return address.replace(/^https?:\/\/|:\d+$/g,'');}}
     function trafficCell(x){if(!Number(x.traffic_limit_bytes))return '<td class="muted">不限制</td>';const used=Number(x.traffic_used_bytes||0),limit=Number(x.traffic_limit_bytes),percent=Math.min(100,Math.round(used/limit*100));return `<td class="resource-cell"><div class="resource-meta"><span>${bytes(used)} / ${bytes(limit)}</span><span>${percent}%</span></div><div class="bar"><span style="width:${percent}%;background:${x.traffic_exceeded?'var(--red)':'var(--green)'}"></span></div>${x.traffic_exceeded?'<div class="grant-expiry">已超额</div>':''}</td>`;}
     const instanceActionKey=(node,name)=>`${node}/${name}`;
@@ -868,6 +933,7 @@
     function calculateCapacity(){
       const node=cluster.nodes.find(x=>x.name===$('targetNode').value);
       const cpu=Math.max(1,Number($('cpu').value||1));
+      const cpuAllowance=Math.max(0,Number($('cpuAllowance').value||0));
       const memory=formBytes($('memoryValue').value,$('memoryUnit').value);
       const disk=formBytes($('diskValue').value,$('diskUnit').value);
       let portsValid=true,sshValid=true,limiter='';
@@ -876,6 +942,7 @@
         capacityMaximum=0;
       }else{
         const limits=[
+          {label:'CPU 安全池',value:$('type').value==='container'?(cpuAllowance?Math.floor(Number(node.cpu_available_percent||0)/cpuAllowance):0):Math.floor(Number(node.cpu_available_percent||0)/(cpu*100))},
           {label:'内存',value:memory?Math.floor(node.available_memory/memory):0},
           {label:'磁盘',value:disk?Math.floor(node.available_disk/disk):0},
           {label:'SSH 端口',value:Number(node.available_ssh_ports||0)},
@@ -898,7 +965,7 @@
         const minimum=Math.min(...limits.map(item=>item.value));
         limiter=limits.filter(item=>item.value===minimum).map(item=>item.label).join('、');
         capacityMaximum=cpu<=Number(node.cpu)&&portsValid&&sshValid?Math.max(0,minimum):0;
-        $('capacityCpu').textContent=`${node.cpu} 核共享 · 单机 ≤ ${node.cpu}`;
+        $('capacityCpu').textContent=`剩余 ${formatCpuCores(Number(node.cpu_available_percent||0)/100)} 核 · 安全池 ${formatCpuCores(Number(node.cpu_budget_percent||0)/100)} 核`;
         $('capacityMemory').textContent=`${bytes(node.available_memory)} 可分配 · 保留 ${bytes(node.memory_reserve||0)}`;
         $('capacityDisk').textContent=`${bytes(node.available_disk)} 可分配 · 保留 ${bytes(node.disk_reserve||0)}`;
         $('capacityPorts').textContent=`${node.available_ssh_ports} 个`;
@@ -917,10 +984,10 @@
     function standardMemoryBytes(budget){return MEMORY_TIERS.filter(value=>value<=budget).pop()||0;}
     function smartSwapBytes(memory,disk,kind){if(kind!=='container'||!memory||!disk)return 0;let target=memory<=512*MIB?512*MIB:memory<=GIB?GIB:memory<=2*GIB?2*GIB:memory<=4*GIB?2*GIB:memory<=8*GIB?4*GIB:8*GIB;const diskLimit=Math.floor(disk/2),tiers=[128,256,512,1024,2048,4096,8192].map(value=>value*MIB);return tiers.filter(value=>value<=target&&value<=diskLimit).pop()||0;}
     function smartImageForPlan(node,count,kind){const budget=smartBudgets(node,count),preferred=['images:debian/12','images:ubuntu/24.04','images:alpine/3.22'],candidates=preferred.map(id=>cluster.public_images.find(image=>image.id===id)).filter(image=>image?.profiles?.[kind]);return candidates.find(image=>{const profile=image.profiles[kind];return profileBytes(profile.minimum_memory)<=budget.memory&&profileBytes(profile.minimum_disk)<=budget.disk;})||candidates.sort((a,b)=>profileBytes(a.profiles[kind].minimum_memory)+profileBytes(a.profiles[kind].minimum_disk)-profileBytes(b.profiles[kind].minimum_memory)-profileBytes(b.profiles[kind].minimum_disk))[0];}
-    function smartResourcePlan(node,count,profile,kind){count=Math.max(1,Number(count)||1);const budget=smartBudgets(node,count),minimumMemory=profileBytes(profile?.minimum_memory),minimumDisk=profileBytes(profile?.minimum_disk),memory=Math.max(minimumMemory,standardMemoryBytes(budget.memory)),disk=Math.max(minimumDisk,Math.floor(budget.disk/GIB)*GIB),hostCpu=Math.max(1,Number(node.cpu)||1),coreCap=kind==='virtual-machine'?8:4,cores=Math.max(1,Math.min(hostCpu,coreCap,Math.floor(hostCpu/Math.min(count,hostCpu))||1)),rawAllowance=Math.floor(hostCpu*85/count),allowance=kind==='container'?Math.max(1,Math.min(cores*100,rawAllowance>=5?Math.floor(rawAllowance/5)*5:rawAllowance)):0,swap=smartSwapBytes(memory,disk,kind);return{count,kind,cores,allowance,memory,disk,swap,memoryBudget:budget.memory,diskBudget:budget.disk,memoryReserve:budget.memoryReserve,diskReserve:budget.diskReserve,constrained:budget.memory<minimumMemory||budget.disk<minimumDisk};}
+    function smartResourcePlan(node,count,profile,kind){count=Math.max(1,Number(count)||1);const budget=smartBudgets(node,count),minimumMemory=profileBytes(profile?.minimum_memory),minimumDisk=profileBytes(profile?.minimum_disk),memory=Math.max(minimumMemory,standardMemoryBytes(budget.memory)),disk=Math.max(minimumDisk,Math.floor(budget.disk/GIB)*GIB),hostCpu=Math.max(1,Number(node.cpu)||1),availablePercent=Math.max(0,Number(node.cpu_available_percent||0)),perInstancePercent=Math.floor(availablePercent/count),coreCap=kind==='virtual-machine'?8:4,containerCores=Math.max(1,Math.min(hostCpu,coreCap,Math.ceil(perInstancePercent/100)||1)),vmCores=Math.max(1,Math.min(hostCpu,coreCap,Math.floor(perInstancePercent/100))),cores=kind==='container'?containerCores:vmCores,allowance=kind==='container'?Math.max(1,Math.min(cores*100,perInstancePercent>=5?Math.floor(perInstancePercent/5)*5:perInstancePercent)):0,swap=smartSwapBytes(memory,disk,kind),cpuConstrained=kind==='container'?perInstancePercent<1:perInstancePercent<100;return{count,kind,cores,allowance,memory,disk,swap,memoryBudget:budget.memory,diskBudget:budget.disk,memoryReserve:budget.memoryReserve,diskReserve:budget.diskReserve,cpuAvailablePercent:availablePercent,constrained:cpuConstrained||budget.memory<minimumMemory||budget.disk<minimumDisk};}
     function setByteSize(prefix,value){const unit=value>=GIB&&value%GIB===0?'GiB':'MiB',divisor=unit==='GiB'?GIB:MIB;$(prefix+'Value').value=Math.max(1,Math.floor(value/divisor));$(prefix+'Unit').value=unit;}
-    function renderSmartPlan(){const note=$('smartPlanNote');note.classList.remove('caution','customized');if(!smartPlan){$('smartPlanText').textContent='选择在线宿主机后生成智能配置';return;}if(smartPlan.customized){note.classList.add('customized');$('smartPlanText').textContent=`已在 ${smartPlan.count} 台智能方案上手动调整；系统或数量变化时会重新平衡`;return;}if(smartPlan.constrained)note.classList.add('caution');const cpuText=smartPlan.kind==='container'?`${smartPlan.cores} vCPU、硬上限 ${formatCpuCores(smartPlan.allowance/100)} 核`:`${smartPlan.cores} vCPU`,swapText=smartPlan.kind==='container'?`、${bytes(smartPlan.swap)} Swap`:'';$('smartPlanText').textContent=smartPlan.constrained?`${smartPlan.imageLabel} 的最低规格高于安全可分配值，已采用最低配置，请检查容量提示`:`已按 ${smartPlan.count} 台均衡配置：每台 ${cpuText}、${bytes(smartPlan.memory)} 内存${swapText}、${bytes(smartPlan.disk)} 磁盘；宿主机保留 ${bytes(smartPlan.memoryReserve)} 内存、${bytes(smartPlan.diskReserve)} 磁盘及 15% CPU`;}
-    function syncCpuPolicy(){const container=$('type').value==='container',cpu=Math.max(1,Number($('cpu').value)||1),allowance=Math.max(0,Number($('cpuAllowance').value)||0),maximum=cpu*100,field=$('cpuAllowanceField'),note=$('cpuPolicyNote');field.classList.toggle('hidden',!container);$('cpuAllowance').disabled=!container;$('cpuAllowance').required=container;$('cpuAllowance').max=maximum;note.classList.toggle('warning',container&&(allowance<1||allowance>maximum));$('cpuPolicyText').textContent=container?`${cpu} 个可用 vCPU，CPU 硬上限 ${allowance}% = ${formatCpuCores(allowance/100)} 核持续算力${allowance>maximum?`；不能超过 ${maximum}%`:''}`:`KVM 分配 ${cpu} 个 vCPU；Incus 不支持虚拟机 CPU allowance，性能边界由 vCPU 数量决定`;}
+    function renderSmartPlan(){const note=$('smartPlanNote');note.classList.remove('caution','customized');if(!smartPlan){$('smartPlanText').textContent='选择在线宿主机后生成智能配置';return;}if(smartPlan.customized){note.classList.add('customized');$('smartPlanText').textContent=`已在 ${smartPlan.count} 台智能方案上手动调整；系统或数量变化时会重新平衡`;return;}if(smartPlan.constrained)note.classList.add('caution');const cpuText=smartPlan.kind==='container'?`每台最多持续 ${formatCpuCores(smartPlan.allowance/100)} 核（可并行 ${smartPlan.cores} vCPU）`:`每台独占预算 ${smartPlan.cores} vCPU`,swapText=smartPlan.kind==='container'?`、${bytes(smartPlan.swap)} Swap`:'';$('smartPlanText').textContent=smartPlan.constrained?`当前 CPU、内存或磁盘安全池无法容纳该方案，请减少数量或选择更轻量系统`:`已按 ${smartPlan.count} 台严格不超配：${cpuText}、${bytes(smartPlan.memory)} 内存${swapText}、${bytes(smartPlan.disk)} 磁盘；已扣除现有实例承诺并为宿主机保留 15% CPU`;}
+    function syncCpuPolicy(){const container=$('type').value==='container',cpu=Math.max(1,Number($('cpu').value)||1),allowance=Math.max(0,Number($('cpuAllowance').value)||0),maximum=cpu*100,node=cluster.nodes.find(x=>x.name===$('targetNode').value),available=Number(node?.cpu_available_percent||0),count=createMode==='batch'?Math.max(1,Number($('batchCount').value)||1):1,requested=container?allowance*count:cpu*100*count,field=$('cpuAllowanceField'),note=$('cpuPolicyNote');field.classList.toggle('hidden',!container);$('cpuAllowance').disabled=!container;$('cpuAllowance').required=container;$('cpuAllowance').max=maximum;note.classList.toggle('warning',requested>available||container&&(allowance<1||allowance>maximum));$('cpuPolicyText').textContent=container?`每台最多持续 ${formatCpuCores(allowance/100)} 核，可并行使用 ${cpu} 个 CPU 线程；本批需要 ${formatCpuCores(requested/100)} 核，安全池剩余 ${formatCpuCores(available/100)} 核${requested>available?'，已超过可用额度':''}`:`KVM 每个 vCPU 按 1 个完整核心保守计账；本批需要 ${formatCpuCores(requested/100)} 核，安全池剩余 ${formatCpuCores(available/100)} 核`;}
     function syncSwapPolicy(){const kind=$('type').value,memory=formBytes($('memoryValue').value,$('memoryUnit').value),disk=formBytes($('diskValue').value,$('diskUnit').value),swap=smartSwapBytes(memory,disk,kind);$('swapPolicyText').textContent=kind==='container'?`自动配置 ${bytes(swap)} Swap 上限：内存决定目标档位，且不超过系统盘的一半；实际可用量取决于宿主机 Swap`:'KVM 的 Swap 由虚拟机操作系统内部管理，面板不写入无效的 Incus 容器参数';$('summarySwap').textContent=kind==='container'?`${bytes(swap)} · 智能`:'系统内部管理';return swap;}
     function applySmartConfiguration({selectImage=false}={}){const node=cluster.nodes.find(item=>item.name===$('targetNode').value),count=createMode==='batch'?Math.max(1,Number($('batchCount').value)||1):1,kind=$('type').value;if(!node){smartPlan=null;renderSmartPlan();updateSummary();return;}if(selectImage){const image=smartImageForPlan(node,count,kind);if(image&&[...$('image').options].some(option=>option.value===image.id))$('image').value=image.id;}const image=selectedImage(),profile=image?.profiles?.[kind];if(!profile){smartPlan=null;renderSmartPlan();updateSummary();return;}const plan=smartResourcePlan(node,count,profile,kind);smartApplying=true;$('cpu').value=plan.cores;$('cpuAllowance').value=plan.allowance;setByteSize('memory',plan.memory);setByteSize('disk',plan.disk);smartApplying=false;smartPlan={...plan,imageLabel:image.label,customized:false};smartPlanInitialized=true;renderSmartPlan();updateSummary();}
     function markSmartCustomized(){if(smartApplying||!smartPlan)return;smartPlan.customized=true;renderSmartPlan();}

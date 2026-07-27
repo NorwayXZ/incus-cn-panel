@@ -787,8 +787,30 @@ def format_binary_size(value):
     return f"{value // MIB_BYTES}MiB"
 
 
-def allocation_summary(instances, memory_total=0):
+def host_cpu_budget_percent(cpu_total):
+    return max(0, int(cpu_total or 0) * 85)
+
+
+def instance_cpu_commitment_percent(instance, cpu_total=0):
+    cpu_value = str(instance.get("cpu", ""))
+    cpu_percent = (
+        int(cpu_value) * 100
+        if cpu_value.isdigit()
+        else max(0, int(cpu_total or 0)) * 100
+    )
+    if instance.get("type") == "virtual-machine":
+        return cpu_percent
+    allowance = str(instance.get("cpu_allowance", ""))
+    hard = re.fullmatch(r"([0-9]+)ms/([1-9][0-9]*)ms", allowance)
+    if hard:
+        return (int(hard.group(1)) * 100 + int(hard.group(2)) - 1) // int(hard.group(2))
+    # Percentage allowances are soft shares, so reserve all visible vCPUs.
+    return cpu_percent
+
+
+def allocation_summary(instances, memory_total=0, cpu_total=0):
     cpu = 0
+    cpu_commitment_percent = 0
     memory = 0
     disk = 0
     unlimited = 0
@@ -802,6 +824,7 @@ def allocation_summary(instances, memory_total=0):
             cpu += int(cpu_value)
         else:
             unlimited += 1
+        cpu_commitment_percent += instance_cpu_commitment_percent(instance, cpu_total)
         if memory_value.endswith("%"):
             try:
                 memory += int(memory_total * float(memory_value[:-1]) / 100)
@@ -818,6 +841,7 @@ def allocation_summary(instances, memory_total=0):
             forwarded_ports += int(end) - int(start) + 1
     return {
         "cpu": cpu,
+        "cpu_commitment_percent": cpu_commitment_percent,
         "memory": memory,
         "disk": disk,
         "unlimited_instances": unlimited,
@@ -1043,7 +1067,10 @@ def inspect_node(name, remote):
             disk_used = int(space.get("used", 0))
         except Exception:
             pass
-        allocations = allocation_summary(instances, int(memory.get("total", 0)))
+        cpu_total = int((resources.get("cpu") or {}).get("total", 0))
+        allocations = allocation_summary(
+            instances, int(memory.get("total", 0)), cpu_total
+        )
         occupied_ports = occupied_host_ports(instances)
         memory_total = int(memory.get("total", 0))
         memory_used = int(memory.get("used", 0))
@@ -1056,6 +1083,9 @@ def inspect_node(name, remote):
         memory_committed = max(memory_used, host_memory_used + allocations["memory"])
         disk_reserve = host_disk_reserve(disk_total)
         disk_committed = max(disk_used, allocations["disk"])
+        cpu_budget_percent = host_cpu_budget_percent(cpu_total)
+        cpu_committed_percent = allocations["cpu_commitment_percent"]
+        cpu_available_percent = max(0, cpu_budget_percent - cpu_committed_percent)
         load = resources.get("load") or {}
         try:
             images = parse_node_images(
@@ -1070,7 +1100,7 @@ def inspect_node(name, remote):
             "name": name,
             "address": address,
             "status": "online",
-            "cpu": int((resources.get("cpu") or {}).get("total", 0)),
+            "cpu": cpu_total,
             "memory": memory_total,
             "memory_used": memory_used,
             "host_memory_used": host_memory_used,
@@ -1079,9 +1109,12 @@ def inspect_node(name, remote):
             "disk_used": disk_used,
             "disk_reserve": disk_reserve,
             "allocated_cpu": allocations["cpu"],
+            "cpu_budget_percent": cpu_budget_percent,
+            "cpu_committed_percent": cpu_committed_percent,
+            "cpu_available_percent": cpu_available_percent,
             "allocated_memory": allocations["memory"],
             "allocated_disk": allocations["disk"],
-            "available_cpu": int((resources.get("cpu") or {}).get("total", 0)),
+            "available_cpu": cpu_available_percent / 100,
             "available_memory": max(
                 0, memory_total - memory_committed - memory_reserve
             ),
@@ -1114,6 +1147,9 @@ def inspect_node(name, remote):
             "disk_used": 0,
             "disk_reserve": 0,
             "allocated_cpu": 0,
+            "cpu_budget_percent": 0,
+            "cpu_committed_percent": 0,
+            "cpu_available_percent": 0,
             "allocated_memory": 0,
             "allocated_disk": 0,
             "available_cpu": 0,
@@ -1155,6 +1191,7 @@ def inspect_node_live(name, remote):
             disk_used = int(space.get("used", 0))
         except Exception:
             pass
+        running_instances = sum(instance.get("status") == "Running" for instance in instances)
         return {
             "name": name,
             "status": "online",
@@ -1165,6 +1202,8 @@ def inspect_node_live(name, remote):
             "disk": disk_total,
             "disk_used": disk_used,
             "instance_count": len(instances),
+            "running_instance_count": running_instances,
+            "stopped_instance_count": len(instances) - running_instances,
             "instance_cpu_usage_ns": sum(
                 int(instance.get("cpu_usage_ns", 0) or 0) for instance in instances
             ),
@@ -1187,6 +1226,8 @@ def inspect_node_live(name, remote):
             "disk": 0,
             "disk_used": 0,
             "instance_count": 0,
+            "running_instance_count": 0,
+            "stopped_instance_count": 0,
             "instance_cpu_usage_ns": 0,
             "instance_network_rx_bytes": 0,
             "instance_network_tx_bytes": 0,
@@ -2418,7 +2459,7 @@ def configure_instance_access(node, name):
             raise
 
 
-def create_instance(data):
+def create_instance(data, validate_capacity=False):
     node = require_node(str(data.get("node", "")))
     name = str(data.get("name", ""))
     kind = str(data.get("type", ""))
@@ -2468,6 +2509,14 @@ def create_instance(data):
     ref = f"{node}:{name}"
     created = False
     with INSTANCE_MUTATION_LOCK:
+        if validate_capacity:
+            node_info = live_node_info(node)
+            maximum, limits = maximum_instances(node_info, data)
+            if maximum < 1:
+                raise ValueError(
+                    "宿主机安全资源不足：当前配置会超过 CPU、内存或磁盘的"
+                    f"安全预算（CPU 还可创建 {limits.get('cpu', 0)} 台）"
+                )
         if ssh_port and port_is_used(node, ssh_port):
             raise ValueError("该节点上的 SSH 端口已被其他实例占用")
         reserved_ports = set(range(port_range[0], port_range[1] + 1)) if port_range else set()
@@ -2561,14 +2610,30 @@ def create_instance(data):
 
 
 def maximum_instances(node_info, data):
-    cpu = int(str(data.get("cpu", "0")) or 0)
+    try:
+        cpu = int(str(data.get("cpu", "0")) or 0)
+    except (TypeError, ValueError):
+        cpu = 0
     memory = parse_size_bytes(data.get("memory", ""))
     disk = parse_size_bytes(data.get("disk", ""))
     if cpu < 1 or memory < 1 or disk < 1 or node_info.get("status") != "online":
         return 0, {}
-    cpu_total = int(node_info.get("cpu", node_info.get("available_cpu", 0)))
+    cpu_total = int(node_info.get("cpu", 0))
+    kind = str(data.get("type", "container"))
+    if kind == "virtual-machine":
+        cpu_per_instance = cpu * 100
+    else:
+        allowance = str(data.get("cpu_allowance", cpu * 100))
+        cpu_per_instance = int(allowance) if allowance.isdigit() else 0
+        if cpu_per_instance > cpu * 100:
+            cpu_per_instance = 0
+    cpu_budget = int(node_info.get("cpu_budget_percent", host_cpu_budget_percent(cpu_total)))
+    cpu_committed = int(node_info.get("cpu_committed_percent", 0))
+    cpu_available = int(node_info.get(
+        "cpu_available_percent", max(0, cpu_budget - cpu_committed)
+    ))
     limits = {
-        "cpu": "共享" if cpu <= cpu_total else 0,
+        "cpu": cpu_available // cpu_per_instance if cpu_per_instance else 0,
         "memory": int(node_info.get("available_memory", 0)) // memory,
         "disk": int(node_info.get("available_disk", 0)) // disk,
         "ssh_ports": int(node_info.get("available_ssh_ports", 0)),
@@ -2586,9 +2651,9 @@ def maximum_instances(node_info, data):
             ))
         except (TypeError, ValueError):
             limits["forward_ports"] = 0
-    if cpu > cpu_total:
+    if cpu > cpu_total or cpu_per_instance < 1:
         return 0, limits
-    hard_limits = [limits[key] for key in ("memory", "disk", "ssh_ports")]
+    hard_limits = [limits[key] for key in ("cpu", "memory", "disk", "ssh_ports")]
     if "forward_ports" in limits:
         hard_limits.append(limits["forward_ports"])
     return max(0, min(hard_limits)), limits
@@ -2653,7 +2718,8 @@ def create_batch_instances(data):
             raise ValueError(
                 f"当前配置最多还能创建 {maximum} 台（内存 {limits.get('memory', 0)}、"
                 f"磁盘 {limits.get('disk', 0)}、SSH {limits.get('ssh_ports', 0)}、"
-                f"业务端口 {limits.get('forward_ports', '未限制')}；CPU 共享调度）"
+                f"CPU {limits.get('cpu', 0)}、业务端口 "
+                f"{limits.get('forward_ports', '未限制')}；宿主机 CPU 已预留 15%）"
             )
         existing = {item["name"] for item in node_info.get("instances", [])}
         duplicate = next((name for name in names if name in existing), "")
@@ -3168,7 +3234,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = self.read_json()
                 node = str(data.get("node", ""))
                 name = str(data.get("name", ""))
-                node, name, access = create_instance(data)
+                node, name, access = create_instance(data, validate_capacity=True)
                 record_operation("instance_create", name, node)
                 self.send_json(201, {"ok": True, "access": access})
             except subprocess.TimeoutExpired:

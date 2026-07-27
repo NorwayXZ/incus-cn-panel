@@ -22,7 +22,7 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.6.4")
+        self.assertEqual(app.APP_VERSION, "1.6.5")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
         response.read.return_value = b"1.7.0\n"
@@ -115,7 +115,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "1.6.4")
+                self.assertEqual(data["panel_version"], "1.6.5")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -268,17 +268,65 @@ class ValidationTests(unittest.TestCase):
             0,
         )
 
-    def test_capacity_treats_cpu_as_shared_and_uses_hard_resources(self):
+    def test_capacity_enforces_cpu_safety_budget_and_hard_resources(self):
         maximum, limits = app.maximum_instances({
             "status": "online",
             "cpu": 8,
-            "available_cpu": 8,
+            "cpu_budget_percent": 680,
+            "cpu_committed_percent": 150,
+            "cpu_available_percent": 530,
             "available_memory": 3 * 1024**3,
             "available_disk": 50 * 1024**3,
             "available_ssh_ports": 100,
-        }, {"cpu": "2", "memory": "512MiB", "disk": "5GiB"})
-        self.assertEqual(limits, {"cpu": "共享", "memory": 6, "disk": 10, "ssh_ports": 100})
-        self.assertEqual(maximum, 6)
+        }, {
+            "type": "container", "cpu": "2", "cpu_allowance": "95",
+            "memory": "512MiB", "disk": "5GiB",
+        })
+        self.assertEqual(limits, {"cpu": 5, "memory": 6, "disk": 10, "ssh_ports": 100})
+        self.assertEqual(maximum, 5)
+
+    def test_four_core_cpu_budget_deducts_existing_commitments(self):
+        self.assertEqual(app.host_cpu_budget_percent(4), 340)
+        instances = [
+            {"type": "container", "cpu": "2", "cpu_allowance": "95ms/100ms"},
+            {"type": "container", "cpu": "1", "cpu_allowance": "55ms/100ms"},
+        ]
+        self.assertEqual(app.allocation_summary(instances)["cpu_commitment_percent"], 150)
+        node = {
+            "status": "online", "cpu": 4,
+            "cpu_budget_percent": 340, "cpu_committed_percent": 150,
+            "cpu_available_percent": 190,
+            "available_memory": 8 * 1024**3,
+            "available_disk": 80 * 1024**3,
+            "available_ssh_ports": 100,
+        }
+        common = {
+            "type": "container", "cpu": "1", "memory": "256MiB", "disk": "2GiB",
+        }
+        self.assertEqual(app.maximum_instances(node, {**common, "cpu_allowance": "95"})[0], 2)
+        self.assertEqual(app.maximum_instances(node, {**common, "cpu_allowance": "96"})[0], 1)
+
+    def test_cpu_commitment_is_conservative_for_kvm_and_legacy_lxc(self):
+        self.assertEqual(app.instance_cpu_commitment_percent({
+            "type": "virtual-machine", "cpu": "2", "cpu_allowance": "",
+        }), 200)
+        self.assertEqual(app.instance_cpu_commitment_percent({
+            "type": "container", "cpu": "3", "cpu_allowance": "50%",
+        }), 300)
+        self.assertEqual(app.instance_cpu_commitment_percent({
+            "type": "container", "cpu": "不限", "cpu_allowance": "100%",
+        }, cpu_total=4), 400)
+        node = {
+            "status": "online", "cpu": 4, "cpu_available_percent": 340,
+            "available_memory": 8 * 1024**3, "available_disk": 80 * 1024**3,
+            "available_ssh_ports": 100,
+        }
+        maximum, limits = app.maximum_instances(node, {
+            "type": "container", "cpu": "1", "cpu_allowance": "broken",
+            "memory": "256MiB", "disk": "2GiB",
+        })
+        self.assertEqual(maximum, 0)
+        self.assertEqual(limits["cpu"], 0)
 
     def test_password_hash(self):
         self.assertTrue(app.password_matches("test-password"))
@@ -927,7 +975,7 @@ class ValidationTests(unittest.TestCase):
         self.assertIn('id="swapPolicyText"', app.HTML)
         self.assertIn('id="summarySwap"', app.HTML)
         self.assertIn("100% = 1 核", app.HTML)
-        self.assertIn("KVM 分配", app.HTML)
+        self.assertIn("KVM 每个 vCPU", app.HTML)
         self.assertIn("function smartResourcePlan", app.HTML)
         self.assertIn("function smartImageForPlan", app.HTML)
         self.assertIn("function standardMemoryBytes", app.HTML)
@@ -950,7 +998,7 @@ class ValidationTests(unittest.TestCase):
         self.assertIn('id="adminAccountDialog"', app.HTML)
         self.assertIn("/api/account/password", app.HTML)
         self.assertIn("/api/nodes/live", app.HTML)
-        for label in ("实例 CPU", "宿主机内存", "实例下载", "实例上传"):
+        for label in ("运行健康", "CPU 安全预算", "宿主机保留", "实例已承诺", "安全池剩余", "实例网络"):
             self.assertIn(label, app.HTML)
         self.assertIn("startNodeLivePolling", app.HTML)
         self.assertIn("location.pathname", app.HTML)
@@ -1122,6 +1170,9 @@ class ValidationTests(unittest.TestCase):
         node = app.inspect_node("node-a", {"Addrs": ["https://203.0.113.10:8443"]})
 
         self.assertEqual(node["host_memory_used"], 512 * 1024**2)
+        self.assertEqual(node["cpu_budget_percent"], 340)
+        self.assertEqual(node["cpu_committed_percent"], 100)
+        self.assertEqual(node["cpu_available_percent"], 240)
         self.assertEqual(node["memory_reserve"], 512 * 1024**2)
         self.assertEqual(node["available_memory"], 2 * 1024**3)
         self.assertEqual(node["disk_reserve"], 2 * 1024**3)
@@ -1156,6 +1207,8 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(sample["memory_used"], 768 * 1024**2)
         self.assertEqual(sample["disk"], 15 * 1024**3)
         self.assertEqual(sample["disk_used"], 5 * 1024**3)
+        self.assertEqual(sample["running_instance_count"], 1)
+        self.assertEqual(sample["stopped_instance_count"], 0)
         self.assertEqual(sample["instance_cpu_usage_ns"], 4_000_000_000)
         self.assertEqual(sample["instance_network_rx_bytes"], 8_000_000)
         self.assertEqual(sample["instance_network_tx_bytes"], 3_000_000)
@@ -1499,7 +1552,7 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "最多还能创建 4 台"):
                 app.create_batch_instances({
                     "node": "node-a", "name_prefix": "vps-", "count": 5,
-                    "cpu": "1", "memory": "256MiB", "disk": "2GiB",
+                    "cpu": "1", "cpu_allowance": "50", "memory": "256MiB", "disk": "2GiB",
                 })
 
     def test_batch_failure_rolls_back_completed_instances(self):
@@ -1522,7 +1575,8 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "provision failed"):
                 app.create_batch_instances({
                     "node": "node-a", "name_prefix": "vps-", "count": 2,
-                    "cpu": "1", "memory": "256MiB", "disk": "2GiB",
+                    "cpu": "1", "cpu_allowance": "50",
+                    "memory": "256MiB", "disk": "2GiB",
                 })
         run_incus.assert_called_once_with(
             "delete", "node-a:vps-001", "--force", timeout=180,
