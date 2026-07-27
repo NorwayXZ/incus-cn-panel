@@ -22,13 +22,13 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "2.1.0")
+        self.assertEqual(app.APP_VERSION, "2.2.0")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"2.1.1\n"
+        response.read.return_value = b"2.2.1\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "2.1.1")
+            self.assertEqual(app.fetch_latest_version(), "2.2.1")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -37,10 +37,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "2.1.1",
+            "status": "running", "target_version": "2.2.1",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "2.1.1")
+        self.assertEqual(payload["latest_version"], "2.2.1")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -56,7 +56,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("2.1.1")
+                    status = app.start_panel_update("2.2.1")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -64,7 +64,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "2.1.1")
+                self.assertEqual(saved["target_version"], "2.2.1")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -115,7 +115,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "2.1.0")
+                self.assertEqual(data["panel_version"], "2.2.0")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -246,7 +246,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(summary["ssh_ports"], 1)
 
     def test_host_reserves_and_automatic_swap_use_standard_tiers(self):
-        self.assertEqual(app.host_memory_reserve(1024**3), 512 * 1024**2)
+        self.assertEqual(app.host_memory_reserve(1024**3), 128 * 1024**2)
         self.assertEqual(app.host_memory_reserve(8 * 1024**3), 1024**3)
         self.assertEqual(app.host_disk_reserve(20 * 1024**3), 2 * 1024**3)
         self.assertEqual(app.host_disk_reserve(100 * 1024**3), 5 * 1024**3)
@@ -267,6 +267,36 @@ class ValidationTests(unittest.TestCase):
             app.recommended_swap_bytes("1GiB", "4GiB", "virtual-machine"),
             0,
         )
+
+    def test_node_reserve_policy_can_use_128_mib_memory_floor(self):
+        old_values = (app.DATA_DIR, app.NODE_SETTINGS_FILE)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.NODE_SETTINGS_FILE = os.path.join(directory, "node-settings.json")
+                info = {
+                    "memory": 512 * app.MIB_BYTES,
+                    "disk": 10 * app.GIB_BYTES,
+                    "cpu": 1,
+                }
+                with mock.patch("app.require_node", return_value="node-a"), \
+                     mock.patch("app.live_node_info", return_value=info):
+                    saved = app.update_node_settings("node-a", {
+                        "memory_reserve_bytes": 128 * app.MIB_BYTES,
+                        "disk_reserve_bytes": 512 * app.MIB_BYTES,
+                        "cpu_reserve_percent": 10,
+                    })
+                self.assertEqual(saved["memory_reserve_bytes"], 128 * app.MIB_BYTES)
+                policy = app.effective_node_reserves(
+                    "node-a", info["memory"], info["disk"], info["cpu"],
+                )
+                self.assertTrue(policy["configured"])
+                self.assertEqual(policy["cpu_reserve_percent"], 10)
+                self.assertEqual(
+                    app.host_cpu_budget_percent(1, policy["cpu_reserve_percent"]), 90,
+                )
+        finally:
+            app.DATA_DIR, app.NODE_SETTINGS_FILE = old_values
 
     def test_capacity_enforces_cpu_safety_budget_and_hard_resources(self):
         maximum, limits = app.maximum_instances({
@@ -973,6 +1003,12 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("renderTasks", app.HTML)
         self.assertIn('id="resourceStrategy"', app.HTML)
         self.assertIn('id="proxyPresetDetail"', app.HTML)
+        for label in ("高性能代理 · 1G", "大内存代理 · 2G", "自定义规格"):
+            self.assertIn(label, app.HTML)
+        self.assertIn('id="nodeSettingsDialog"', app.HTML)
+        self.assertIn("dataset.nodeSettings", app.HTML)
+        self.assertIn("function syncNodeCapability", app.HTML)
+        self.assertIn("KVM 虚拟机 · 当前宿主机不可用", app.HTML)
         self.assertIn("function syncProxyPresetDetail", app.HTML)
         self.assertIn("状态一致性", app.HTML)
         self.assertIn("备份与网络", app.HTML)
@@ -1085,11 +1121,15 @@ class ValidationTests(unittest.TestCase):
     @mock.patch("app.registered_remotes", return_value={})
     @mock.patch("app.run_incus")
     def test_add_remote_uses_explicit_address_and_checks_node_requirements(self, run_incus, _):
-        app.add_remote(
-            "node-hk-01",
-            "https://203.0.113.10:8443",
-            "one-time-trust-token",
-        )
+        with mock.patch("app.node_preflight", return_value={
+            "admission": {"eligible": True},
+        }) as preflight:
+            app.add_remote(
+                "node-hk-01",
+                "https://203.0.113.10:8443",
+                "one-time-trust-token",
+            )
+        preflight.assert_called_once_with("node-hk-01", probe=True)
         self.assertEqual(
             run_incus.call_args_list,
             [
@@ -1120,6 +1160,31 @@ class ValidationTests(unittest.TestCase):
             run_incus.call_args_list[-1],
             mock.call("remote", "remove", "node-hk-01", timeout=20),
         )
+
+    @mock.patch("app.registered_remotes", return_value={})
+    @mock.patch("app.delete_node_settings")
+    @mock.patch("app.node_preflight", return_value={
+        "summary": "存在阻断项",
+        "admission": {
+            "eligible": False,
+            "reasons": ["物理内存 256 MiB", "临时 LXC 启动失败"],
+        },
+    })
+    @mock.patch("app.run_incus")
+    def test_add_remote_removes_node_when_container_admission_fails(
+        self, run_incus, _preflight, delete_settings, _remotes,
+    ):
+        with self.assertRaises(app.NodeConnectionError) as context:
+            app.add_remote(
+                "node-hk-01", "https://203.0.113.10:8443", "one-time-token",
+            )
+        self.assertEqual(context.exception.stage, "切割能力检测")
+        self.assertIn("物理内存 256 MiB", context.exception.detail)
+        self.assertEqual(
+            run_incus.call_args_list[-1],
+            mock.call("remote", "remove", "node-hk-01", timeout=20),
+        )
+        delete_settings.assert_called_once_with("node-hk-01")
 
     def test_node_connection_failure_is_actionable_and_redacts_token(self):
         token = "secret-one-time-token-value"
@@ -1178,6 +1243,30 @@ class ValidationTests(unittest.TestCase):
             app.TASK_RUNNERS.pop(task_type, None)
             app.TASK_FUTURES.clear()
 
+    def test_instance_delete_verifies_incus_and_reports_control_cleanup(self):
+        context = mock.Mock()
+        with mock.patch(
+            "app.validate_instance_identity",
+            return_value=("node-a", "proxy-01", "node-a:proxy-01"),
+        ), mock.patch("app.run_incus", side_effect=[None, "[]"]) as run_incus, \
+             mock.patch("app.delete_credentials", return_value=True), \
+             mock.patch("app.remove_instance_assignments", return_value=1), \
+             mock.patch("app.remove_traffic_usage", return_value=True), \
+             mock.patch("app._remove_domain_routes_for_instance", return_value=2):
+            result = app.task_instance_delete(context, {
+                "node": "node-a", "name": "proxy-01",
+            })
+        self.assertEqual(
+            run_incus.call_args_list,
+            [
+                mock.call("delete", "node-a:proxy-01", "--force", timeout=600),
+                mock.call("list", "node-a:", "--format=json", timeout=30),
+            ],
+        )
+        self.assertTrue(result["cleanup"]["incus_instance_absent"])
+        self.assertEqual(result["cleanup"]["assignments_removed"], 1)
+        self.assertIn("资源和端口已释放", result["message"])
+
     def test_node_preflight_reports_capabilities_and_storage(self):
         responses = [
             {"environment": {"server_version": "6.12", "kernel_version": "6.1"},
@@ -1196,6 +1285,62 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(report["capabilities"]["containers"])
         self.assertTrue(report["capabilities"]["virtual_machines"])
         self.assertEqual(report["facts"]["storage_driver"], "dir")
+
+    def test_node_preflight_separates_lxc_and_kvm_capabilities(self):
+        responses = [
+            {"environment": {"server_version": "6.12"},
+             "config": {"user.incus-cn-panel.kvm": "true"}},
+            {"cpu": {"total": 2}, "memory": {"total": 2 * app.GIB_BYTES}},
+            {"driver": "dir"},
+            {"space": {"total": 20 * app.GIB_BYTES, "used": 2 * app.GIB_BYTES}},
+            {"managed": True},
+        ]
+        with mock.patch("app.require_node", return_value="node-a"), \
+             mock.patch("app.run_incus", side_effect=[json.dumps(item) for item in responses]), \
+             mock.patch("app.probe_node_container", return_value=(True, "LXC 实测通过")), \
+             mock.patch("app.probe_node_virtual_machine", return_value=(False, "/dev/kvm 不可用")), \
+             mock.patch("app.save_node_health", side_effect=lambda report: report):
+            report = app.node_preflight("node-a", probe=True)
+        self.assertTrue(report["admission"]["eligible"])
+        self.assertTrue(report["capabilities"]["containers"])
+        self.assertFalse(report["capabilities"]["virtual_machines"])
+        self.assertEqual(
+            next(item for item in report["checks"] if item["code"] == "kvm")["status"],
+            "warning",
+        )
+
+    def test_node_preflight_rejects_host_without_one_light_instance_of_headroom(self):
+        responses = [
+            {"environment": {"server_version": "6.12"}, "config": {}},
+            {"cpu": {"total": 1}, "memory": {
+                "total": 512 * app.MIB_BYTES, "used": 320 * app.MIB_BYTES,
+            }},
+            {"driver": "dir"},
+            {"space": {"total": 4 * app.GIB_BYTES, "used": app.GIB_BYTES}},
+            {"managed": True},
+        ]
+        with mock.patch("app.require_node", return_value="node-a"), \
+             mock.patch("app.run_incus", side_effect=[json.dumps(item) for item in responses]), \
+             mock.patch("app.probe_node_container") as probe, \
+             mock.patch("app.save_node_health", side_effect=lambda report: report):
+            report = app.node_preflight("node-a", probe=True)
+        self.assertFalse(report["admission"]["eligible"])
+        self.assertEqual(
+            next(item for item in report["checks"] if item["code"] == "safe_capacity")["status"],
+            "failed",
+        )
+        probe.assert_not_called()
+
+    def test_kvm_creation_is_rejected_before_instance_commands(self):
+        report = {
+            "summary": "LXC 可用，KVM 不可用",
+            "admission": {"eligible": True, "probe_verified": True},
+            "capabilities": {"containers": True, "virtual_machines": False},
+        }
+        with mock.patch("app.require_node", return_value="node-a"), \
+             mock.patch("app.read_node_health", return_value=report), \
+             self.assertRaisesRegex(ValueError, "未通过 KVM 实测"):
+            app.ensure_node_admitted("node-a", "virtual-machine")
 
     def test_scheduler_plan_uses_standard_tiers_and_cpu_budget(self):
         node = {
@@ -1230,6 +1375,8 @@ class ValidationTests(unittest.TestCase):
             "density": (128 * app.MIB_BYTES, 2 * app.GIB_BYTES, 25),
             "balanced": (256 * app.MIB_BYTES, 4 * app.GIB_BYTES, 50),
             "stable": (512 * app.MIB_BYTES, 6 * app.GIB_BYTES, 100),
+            "large": (app.GIB_BYTES, 10 * app.GIB_BYTES, 150),
+            "xlarge": (2 * app.GIB_BYTES, 20 * app.GIB_BYTES, 200),
         }
         for strategy, (memory, disk, allowance) in expected.items():
             with self.subTest(strategy=strategy):
@@ -1239,9 +1386,12 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(plan["workload"], "proxy")
                 self.assertEqual(plan["memory_bytes"], memory)
                 self.assertEqual(plan["disk_bytes"], disk)
-                self.assertEqual(plan["cpu"], 1)
+                self.assertEqual(plan["cpu"], 1 if allowance <= 100 else 2)
                 self.assertEqual(plan["cpu_allowance"], allowance)
-                self.assertEqual(plan["swap_bytes"], 512 * app.MIB_BYTES)
+                self.assertEqual(
+                    plan["swap_bytes"],
+                    512 * app.MIB_BYTES if memory <= 512 * app.MIB_BYTES else memory,
+                )
 
     def test_proxy_scheduler_raises_resources_for_heavier_image(self):
         node = {

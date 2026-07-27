@@ -20,14 +20,14 @@
 
 - 中文响应式 Web 控制台，采用编辑部式基础设施视觉系统，包含登录页、统计概览、宿主机、添加宿主机、切割实例、实例管理、镜像管理和操作日志
 - 使用 Trust Token 接入多个 Incus 计算节点
-- 添加宿主机时直接使用填写的公网地址建立信任，并分阶段验证 API、宿主资源、default 存储池和 incusbr0 网络；失败时显示原因、原始诊断和排查建议
-- 宿主机接入后生成体检报告，核对 Incus 版本、CPU、内存、default 存储池、incusbr0 和 KVM 能力，并给出阻断项与修复建议
+- 添加宿主机时先临时建立信任，全面检查 CPU、内存、default 存储池和 incusbr0，再真实创建、启动和删除临时 LXC；不合格时自动撤销连接并用中文显示原因和最低标准
+- LXC 与 KVM 分开实测：通过 LXC 准入但没有嵌套虚拟化的宿主机可正常接入，创建页会明确标记“仅 LXC”并禁用 KVM
 - 持久化任务中心异步执行单台与批量创建，展示阶段、进度和失败原因；支持取消、失败重试和服务重启后的中断恢复
 - 实例生命周期管理支持快照创建/回滚/删除、跨宿主机迁移、系统重装和带输出限制的命令控制台
 - 将实例完整导出到控制端并恢复，支持每天或每周自动备份和 1-30 份保留策略
 - 为实例添加独立 TCP/UDP 端口转发，端口冲突检查同时覆盖 SSH、连续端口段和 Incus proxy 设备
 - 将域名绑定到实例 TCP 端口并生成 Caddy 自动 HTTPS 配置；独立托管 Caddy 与系统已有 Caddy 互不覆盖
-- 服务端资源调度器提供轻量、标准和稳定三种代理节点档位，统一计算 128/256/512MiB 内存、CPU 安全预算、Swap 与创建上限
+- 服务端资源调度器提供 128MiB、256MiB、512MiB、1GiB、2GiB 五种代理档位及完全自定义规格，统一计算 CPU 安全预算、Swap 与创建上限
 - 每 10 分钟核对 Incus 实际实例与控制端 SSH 凭据、流量计数和用户授权，管理员可从任务中心清理孤立记录
 - 宿主机使用组合监控板显示运行健康、架构、负载、CPU 安全预算、内存、存储池、实例状态和端口容量
 - 宿主机页面每 5 秒刷新内存、存储池、1 分钟负载，并按实例计数器显示实时 CPU 与上传/下载速率
@@ -35,7 +35,7 @@
 - 浏览 `images.linuxcontainers.org` 公共镜像目录，在宿主机预拉取、查看和删除缓存镜像
 - 将 Incus 统一镜像 tar 导入指定宿主机，并直接使用本地镜像创建实例
 - 按发行版和 LXC/KVM 显示最低、推荐内存与磁盘，支持一键应用推荐规格
-- 先为宿主机保留 CPU、内存和磁盘操作空间，再按剩余安全容量与 SSH 端口计算批量创建上限
+- 每台宿主机可独立编辑 CPU、内存和磁盘保留策略，内存最低可保留 128MiB；面板按实际剩余安全容量与 SSH 端口计算批量创建上限
 - 按创建数量智能选择稳定系统并均衡 vCPU、LXC CPU 硬上限、标准档位内存、Swap 和磁盘；切换系统后按该镜像最低规格重新规划
 - 创建前实时检查镜像最低规格、重复名称、SSH/业务端口冲突，并显示本次资源占用与创建后余量
 - 设置 CPU 核数与使用上限、内存和磁盘；读写 IOPS 与上下行带宽可选择不限制或自定义
@@ -56,6 +56,7 @@
 - 异常通知中心记录首次发生、持续状态和恢复事件；每类异常可关闭、仅在面板显示或同时推送 Telegram
 - Telegram Bot Token 加密传输、以 `0600` 权限保存在控制端且不会返回浏览器，支持测试消息和恢复通知
 - 启动、停止、重启和删除实例
+- 删除实例后重新查询 Incus，确认根磁盘、快照和 proxy 端口设备已释放，再清理 SSH 凭据、用户授权、流量与域名记录
 - 持久化记录节点接入和实例生命周期操作
 - 搜索实例并按运行状态过滤
 - 在侧边栏检查当前与 GitHub 最新版本，并由管理员一键更新控制面板
@@ -116,7 +117,7 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 
 批量创建使用名称前缀、起始编号和补零位数生成实例名，例如 `vps-001` 至 `vps-010`。单台配置不能超过宿主机物理核心数；批量上限由 CPU 安全池、剩余内存、default 存储池空间和 SSH 端口数量共同决定。服务端会在开始批量任务前重新计算容量，任务中途失败时会尝试清理本批已经创建的实例。
 
-智能配置面向 x-ui、Xray/VLESS、SS2022 等代理节点：轻量代理为 128MiB / 2GiB / 25% CPU，标准代理为 256MiB / 4GiB / 50% CPU，稳定代理为 512MiB / 6GiB / 100% CPU，三档 LXC 均自动配置 512MiB Swap。系统会先从宿主机总容量中保留管理空间：CPU 保留 15%，内存至少保留 512MiB，存储池至少保留 2GiB；公共镜像优先选择 Alpine 3.22。管理员切换到最低要求更高的系统后，内存、磁盘和 CPU 会自动提升到系统需要的档位。如果安全池无法容纳指定数量，页面会保留原数量、禁用创建并显示实际最大数量，不会生成零碎规格或静默减少实例数量。
+智能配置面向 x-ui、Xray/VLESS、SS2022 等代理节点：轻量代理为 128MiB / 2GiB / 25% CPU，标准代理为 256MiB / 4GiB / 50% CPU，稳定代理为 512MiB / 6GiB / 100% CPU，高性能代理为 1GiB / 10GiB / 150% CPU，大内存代理为 2GiB / 20GiB / 200% CPU，也可以切换为自定义规格并手动设置内存、磁盘、vCPU 和持续算力。系统默认保留 15% CPU；小型宿主机默认保留 128MiB 内存，管理员也可以在宿主机卡片中编辑 CPU、内存和磁盘保留值。公共镜像优先选择 Alpine 3.22。管理员切换到最低要求更高的系统后，预设规格会自动提升到系统需要的档位。如果安全池无法容纳指定数量，页面会保留原数量、禁用创建并显示实际最大数量，不会生成零碎规格或静默减少实例数量。
 
 新建 LXC 会自动设置 `limits.memory.swap`。Swap 由内存决定目标档位，并受系统盘容量约束，最多取系统盘的一半作为配置参考；128MiB、256MiB、512MiB 内存在系统盘不少于 1GiB 时均配置 512MiB Swap，1GiB 内存在磁盘充足时配置 1GiB。该值是容器可使用的宿主机 Swap 上限，不会在容器内部创建 swapfile，实际可用量仍取决于宿主机是否提供足够 Swap。Incus 的这一配置只适用于 LXC；KVM 的 Swap 由虚拟机操作系统内部管理。
 
@@ -124,7 +125,7 @@ LXC 的“最多并行 vCPU”控制实例可以同时使用多少个 CPU 线程
 
 CPU 采用严格不超配预算。以 4 核宿主机为例，面板保留 15% 即 0.6 核给宿主系统，实例安全池为 3.4 核。若现有实例已经承诺 1.5 核，那么还能分配 1.9 核；新建两台 LXC 时每台最多分配 0.95 核持续算力。前端会立即提示超额，后端在真正创建前还会再次校验，所以即使所有实例同时达到上限，合计也不会超过安全池。未设置 CPU 上限的外部实例按宿主机全部核心保守计账，避免未知负载被错误当作 0。这里保证的是面板管理实例的 CPU 上限不超配；宿主机上面板之外的进程仍需由管理员控制。
 
-操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，管理员密码哈希保存在 `/var/lib/incus-cn-panel/password.env`，实例 SSH 凭据保存在 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希、配额和限时授权保存在 `/var/lib/incus-cn-panel/users.json`。TOTP 密钥与 API Token 哈希保存在 `security.json`，30 天趋势指标保存在 `metrics-history.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，任务、宿主机体检和状态核对分别保存在 `tasks.json`、`node-health.json` 与 `reconcile-status.json`。实例导出备份位于 `backups/`，备份策略和域名路由分别保存在 `backups.json` 与 `domain-routes.json`，生成的 Caddy 配置为 `Caddyfile.routes`。版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`。这些敏感文件权限均为 `0600`，再次运行控制端安装命令会原地升级并保留数据。
+操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，管理员密码哈希保存在 `/var/lib/incus-cn-panel/password.env`，实例 SSH 凭据保存在 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希、配额和限时授权保存在 `/var/lib/incus-cn-panel/users.json`。TOTP 密钥与 API Token 哈希保存在 `security.json`，30 天趋势指标保存在 `metrics-history.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，任务、宿主机体检、宿主机保留策略和状态核对分别保存在 `tasks.json`、`node-health.json`、`node-settings.json` 与 `reconcile-status.json`。实例导出备份位于 `backups/`，备份策略和域名路由分别保存在 `backups.json` 与 `domain-routes.json`，生成的 Caddy 配置为 `Caddyfile.routes`。版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`。这些敏感文件权限均为 `0600`，再次运行控制端安装命令会原地升级并保留数据。
 
 自动化调用示例：
 

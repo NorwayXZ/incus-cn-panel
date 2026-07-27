@@ -52,6 +52,7 @@ VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION
 UPDATE_STATUS_FILE = os.path.join(DATA_DIR, "update-status.json")
 TASKS_FILE = os.path.join(DATA_DIR, "tasks.json")
 NODE_HEALTH_FILE = os.path.join(DATA_DIR, "node-health.json")
+NODE_SETTINGS_FILE = os.path.join(DATA_DIR, "node-settings.json")
 RECONCILE_FILE = os.path.join(DATA_DIR, "reconcile-status.json")
 UPDATER_PATH = os.environ.get("PANEL_UPDATER_PATH", "/usr/local/sbin/incus-cn-panel-update")
 UPDATE_VERSION_URL = os.environ.get(
@@ -75,6 +76,7 @@ METRICS_LOCK = threading.RLock()
 UPDATE_LOCK = threading.RLock()
 TASK_LOCK = threading.RLock()
 NODE_HEALTH_LOCK = threading.RLock()
+NODE_SETTINGS_LOCK = threading.RLock()
 RECONCILE_LOCK = threading.RLock()
 PASSWORD_CONFIG_LOCK = threading.Lock()
 NODE_LIVE_LOCK = threading.Lock()
@@ -170,6 +172,16 @@ PROXY_CONTAINER_PRESETS = {
         "label": "稳定代理",
         "memory": 512 * MIB_BYTES,
         "disk": 6 * GIB_BYTES,
+    },
+    "large": {
+        "label": "高性能代理",
+        "memory": GIB_BYTES,
+        "disk": 10 * GIB_BYTES,
+    },
+    "xlarge": {
+        "label": "大内存代理",
+        "memory": 2 * GIB_BYTES,
+        "disk": 20 * GIB_BYTES,
     },
 }
 PUBLIC_IMAGES = (
@@ -637,6 +649,7 @@ def remove_instance_assignments(node, name=None):
     with USERS_LOCK:
         users = _read_users_unlocked()
         changed = False
+        removed = 0
         for record in users.values():
             assignments = assignment_map(record)
             filtered = {
@@ -647,10 +660,12 @@ def remove_instance_assignments(node, name=None):
                 if not item.startswith(prefix)
             }
             if filtered != assignments:
+                removed += len(assignments) - len(filtered)
                 record["assignments"] = filtered
                 changed = True
         if changed:
             _write_users_unlocked(users)
+    return removed
 
 
 def account_password_matches(record, password):
@@ -779,7 +794,7 @@ def delete_credentials(node, name=None):
         else:
             changed = credentials.pop(f"{node}/{name}", None) is not None
         if not changed:
-            return
+            return False
         temporary = f"{CREDENTIALS_FILE}.{os.getpid()}.tmp"
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -787,6 +802,7 @@ def delete_credentials(node, name=None):
             handle.write("\n")
         os.replace(temporary, CREDENTIALS_FILE)
         os.chmod(CREDENTIALS_FILE, 0o600)
+    return True
 
 
 def normalize_address(value):
@@ -950,11 +966,41 @@ def add_remote(name, address, token):
                     pass
                 raise node_connection_failure(stage, exc, token, address) from exc
         try:
-            node_preflight(name)
-        except Exception:
-            # The trust relationship is valid at this point. A later health check can retry
-            # optional capability discovery without discarding the newly added remote.
-            pass
+            report = node_preflight(name, probe=True)
+        except Exception as exc:
+            rollback_error = ""
+            try:
+                run_incus("remote", "remove", name, timeout=20)
+            except Exception as rollback_exc:
+                rollback_error = f"；撤销连接失败：{str(rollback_exc)[-300:]}"
+            delete_node_settings(name)
+            raise NodeConnectionError(
+                "切割能力检测", "宿主机全面检测异常，未加入面板",
+                f"{str(exc)[-700:]}{rollback_error}",
+                ["检查控制面板日志后，在宿主机重新生成 Trust Token 再次添加"],
+                502,
+            ) from exc
+        if not report.get("admission", {}).get("eligible"):
+            reasons = report.get("admission", {}).get("reasons") or [report.get("summary", "体检未通过")]
+            rollback_error = ""
+            try:
+                run_incus("remote", "remove", name, timeout=20)
+            except Exception as exc:
+                rollback_error = f"；撤销连接失败：{str(exc)[-300:]}"
+            delete_node_settings(name)
+            raise NodeConnectionError(
+                "切割能力检测",
+                "宿主机不符合切割小机标准，连接撤销失败，请手动移除"
+                if rollback_error else "宿主机不符合切割小机标准，未加入面板",
+                "；".join(str(item) for item in reasons[:5]) + rollback_error,
+                [
+                    "最低标准：1 核 CPU、512 MiB 物理内存、default 存储池至少 3 GiB 可用空间",
+                    "宿主机必须提供可用的托管 incusbr0，并通过临时 LXC 创建、启动和删除实测",
+                    "修复检测项后，在宿主机重新生成 Trust Token 再次添加",
+                ],
+                422,
+            )
+        return report
 
 
 def format_bytes(value):
@@ -985,6 +1031,8 @@ def host_memory_reserve(total):
     total = max(0, int(total or 0))
     if not total:
         return 0
+    if total <= GIB_BYTES:
+        return min(128 * MIB_BYTES, total // 2)
     reserve_step = 512 * MIB_BYTES
     proportional = ((total // 10 + reserve_step - 1) // reserve_step) * reserve_step
     target = max(reserve_step, proportional)
@@ -997,7 +1045,9 @@ def host_disk_reserve(total):
         return 0
     proportional = ((total // 20 + GIB_BYTES - 1) // GIB_BYTES) * GIB_BYTES
     target = max(2 * GIB_BYTES, proportional)
-    return min(target, max(512 * MIB_BYTES, total // 4))
+    cap = max(512 * MIB_BYTES, total // 4)
+    cap = max(512 * MIB_BYTES, cap // (512 * MIB_BYTES) * (512 * MIB_BYTES))
+    return min(target, cap)
 
 
 def recommended_swap_bytes(memory, disk, kind="container"):
@@ -1036,8 +1086,85 @@ def format_binary_size(value):
     return f"{value // MIB_BYTES}MiB"
 
 
-def host_cpu_budget_percent(cpu_total):
-    return max(0, int(cpu_total or 0) * 85)
+def host_cpu_budget_percent(cpu_total, reserve_percent=15):
+    cpu_total = max(0, int(cpu_total or 0))
+    reserve_percent = max(5, min(90, int(reserve_percent or 15)))
+    return cpu_total * (100 - reserve_percent)
+
+
+def default_node_settings_data():
+    return {"version": 1, "nodes": {}}
+
+
+def read_node_settings(node=""):
+    with NODE_SETTINGS_LOCK:
+        data = _read_private_json(NODE_SETTINGS_FILE, default_node_settings_data())
+    nodes = data.get("nodes", {}) if isinstance(data.get("nodes"), dict) else {}
+    return dict(nodes.get(node, {})) if node else nodes
+
+
+def effective_node_reserves(node, memory_total, disk_total, cpu_total):
+    settings = read_node_settings(node)
+    memory_default = host_memory_reserve(memory_total)
+    disk_default = host_disk_reserve(disk_total)
+    memory_reserve = int(settings.get("memory_reserve_bytes", 0) or memory_default)
+    disk_reserve = int(settings.get("disk_reserve_bytes", 0) or disk_default)
+    cpu_reserve_percent = int(settings.get("cpu_reserve_percent", 15) or 15)
+    memory_reserve = min(max(128 * MIB_BYTES, memory_reserve), max(128 * MIB_BYTES, memory_total))
+    disk_reserve = min(max(512 * MIB_BYTES, disk_reserve), max(512 * MIB_BYTES, disk_total))
+    cpu_reserve_percent = max(5, min(90, cpu_reserve_percent))
+    return {
+        "configured": bool(settings),
+        "memory_reserve_bytes": memory_reserve,
+        "disk_reserve_bytes": disk_reserve,
+        "cpu_reserve_percent": cpu_reserve_percent,
+    }
+
+
+def update_node_settings(node, values):
+    node = require_node(node)
+    info = live_node_info(node)
+    try:
+        memory_reserve = int(values.get("memory_reserve_bytes", 0))
+        disk_reserve = int(values.get("disk_reserve_bytes", 0))
+        cpu_reserve_percent = int(values.get("cpu_reserve_percent", 15))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("宿主机保留资源格式无效") from exc
+    if not 128 * MIB_BYTES <= memory_reserve <= int(info.get("memory", 0)):
+        raise ValueError("宿主机内存保留必须在 128 MiB 与物理内存总量之间")
+    if memory_reserve % (128 * MIB_BYTES):
+        raise ValueError("宿主机内存保留必须按 128 MiB 递增")
+    if not 512 * MIB_BYTES <= disk_reserve <= int(info.get("disk", 0)):
+        raise ValueError("宿主机磁盘保留必须在 512 MiB 与存储池总量之间")
+    if disk_reserve % (512 * MIB_BYTES):
+        raise ValueError("宿主机磁盘保留必须按 512 MiB 递增")
+    if not 5 <= cpu_reserve_percent <= 90:
+        raise ValueError("宿主机 CPU 保留比例必须在 5% 到 90% 之间")
+    record = {
+        "memory_reserve_bytes": memory_reserve,
+        "disk_reserve_bytes": disk_reserve,
+        "cpu_reserve_percent": cpu_reserve_percent,
+        "updated_at": utc_now(),
+    }
+    with NODE_SETTINGS_LOCK:
+        data = _read_private_json(NODE_SETTINGS_FILE, default_node_settings_data())
+        data.setdefault("nodes", {})[node] = record
+        _write_private_json(NODE_SETTINGS_FILE, data)
+    return record
+
+
+def delete_node_settings(node):
+    with NODE_SETTINGS_LOCK:
+        data = _read_private_json(NODE_SETTINGS_FILE, default_node_settings_data())
+        removed = data.setdefault("nodes", {}).pop(node, None) is not None
+        if removed:
+            _write_private_json(NODE_SETTINGS_FILE, data)
+    with NODE_HEALTH_LOCK:
+        health = _read_private_json(NODE_HEALTH_FILE, default_node_health_data())
+        health_removed = health.setdefault("nodes", {}).pop(node, None) is not None
+        if health_removed:
+            _write_private_json(NODE_HEALTH_FILE, health)
+    return removed or health_removed
 
 
 def instance_cpu_commitment_percent(instance, cpu_total=0):
@@ -1328,11 +1455,14 @@ def inspect_node(name, remote):
             for instance in instances
         )
         host_memory_used = max(0, memory_used - instance_memory_used)
-        memory_reserve = host_memory_reserve(memory_total)
+        reserve_policy = effective_node_reserves(name, memory_total, disk_total, cpu_total)
+        memory_reserve = reserve_policy["memory_reserve_bytes"]
         memory_committed = max(memory_used, host_memory_used + allocations["memory"])
-        disk_reserve = host_disk_reserve(disk_total)
+        disk_reserve = reserve_policy["disk_reserve_bytes"]
         disk_committed = max(disk_used, allocations["disk"])
-        cpu_budget_percent = host_cpu_budget_percent(cpu_total)
+        cpu_budget_percent = host_cpu_budget_percent(
+            cpu_total, reserve_policy["cpu_reserve_percent"]
+        )
         cpu_committed_percent = allocations["cpu_commitment_percent"]
         cpu_available_percent = max(0, cpu_budget_percent - cpu_committed_percent)
         load = resources.get("load") or {}
@@ -1357,6 +1487,7 @@ def inspect_node(name, remote):
             "disk": disk_total,
             "disk_used": disk_used,
             "disk_reserve": disk_reserve,
+            "resource_policy": reserve_policy,
             "allocated_cpu": allocations["cpu"],
             "cpu_budget_percent": cpu_budget_percent,
             "cpu_committed_percent": cpu_committed_percent,
@@ -1396,6 +1527,7 @@ def inspect_node(name, remote):
             "disk": 0,
             "disk_used": 0,
             "disk_reserve": 0,
+            "resource_policy": {},
             "allocated_cpu": 0,
             "cpu_budget_percent": 0,
             "cpu_committed_percent": 0,
@@ -2108,7 +2240,71 @@ def save_node_health(report):
     return report
 
 
-def node_preflight(node):
+def probe_node_container(node):
+    name = f"panel-check-{secrets.token_hex(4)}"
+    ref = f"{node}:{name}"
+    created = False
+    error = ""
+    cleanup_error = ""
+    try:
+        run_incus(
+            "init", "images:alpine/3.22", ref,
+            "-c", "limits.cpu=1", "-c", "limits.memory=128MiB",
+            timeout=600,
+        )
+        created = True
+        run_incus("start", ref, timeout=180)
+        run_incus("exec", ref, "--", "/bin/true", timeout=60)
+    except Exception as exc:
+        error = str(exc)[-500:]
+    finally:
+        if created:
+            try:
+                run_incus("delete", ref, "--force", timeout=300)
+            except Exception as exc:
+                cleanup_error = str(exc)[-500:]
+    if cleanup_error:
+        return False, f"临时实例清理失败：{cleanup_error}"
+    if error:
+        return False, error
+    return True, "临时 Alpine 容器已完成创建、启动、命令执行和删除"
+
+
+def probe_node_virtual_machine(node):
+    name = f"panel-kvm-check-{secrets.token_hex(4)}"
+    ref = f"{node}:{name}"
+    created = False
+    error = ""
+    cleanup_error = ""
+    try:
+        run_incus(
+            "init", "images:alpine/3.22", ref, "--vm",
+            "-c", "limits.cpu=1", "-c", "limits.memory=512MiB",
+            timeout=600,
+        )
+        created = True
+        run_incus("start", ref, timeout=240)
+        state = json.loads(
+            run_incus("query", f"{node}:/1.0/instances/{name}/state", timeout=60)
+        )
+        if str(state.get("status", "")).lower() != "running":
+            raise RuntimeError(f"临时 KVM 状态异常：{state.get('status', '未知')}")
+    except Exception as exc:
+        error = str(exc)[-500:]
+    finally:
+        if created:
+            try:
+                run_incus("delete", ref, "--force", timeout=300)
+            except Exception as exc:
+                cleanup_error = str(exc)[-500:]
+    if cleanup_error:
+        return False, f"临时 KVM 清理失败：{cleanup_error}"
+    if error:
+        return False, error
+    return True, "临时 Alpine KVM 已完成创建、启动、状态确认和删除"
+
+
+def node_preflight(node, probe=False):
     node = require_node(node)
     checked_at = utc_now()
     checks = []
@@ -2137,13 +2333,26 @@ def node_preflight(node):
                 "remediation": "检查 Incus 服务、8443 端口、TLS 信任和宿主机网络",
             }],
             "capabilities": {"containers": False, "virtual_machines": False},
+            "admission": {
+                "eligible": False, "probe_verified": False,
+                "summary": "不符合切割小机标准：无法读取宿主机基础资源",
+                "reasons": ["Incus API 或基础资源不可用"],
+                "minimum": {
+                    "cpu": "1 个逻辑核心", "memory": "512 MiB 物理内存",
+                    "disk_free": "3 GiB default 可用空间",
+                    "network": "托管 incusbr0 NAT 网络",
+                },
+                "estimated_light_instances": 0,
+            },
         }
         return save_node_health(report)
 
     environment = server.get("environment") or {}
     config = server.get("config") or {}
     cpu_total = int((resources.get("cpu") or {}).get("total", 0) or 0)
-    memory_total = int((resources.get("memory") or {}).get("total", 0) or 0)
+    memory_resource = resources.get("memory") or {}
+    memory_total = int(memory_resource.get("total", 0) or 0)
+    memory_used = int(memory_resource.get("used", 0) or 0)
     space = pool_resources.get("space") or {}
     disk_total = int(space.get("total", 0) or 0)
     disk_used = int(space.get("used", 0) or 0)
@@ -2155,51 +2364,148 @@ def node_preflight(node):
         f"检测到 {cpu_total} 个逻辑核心",
         "宿主机至少需要 1 个可用 CPU 核心" if cpu_total < 1 else "",
     )
-    memory_status = "passed" if memory_total >= GIB_BYTES else "warning"
+    memory_status = "passed" if memory_total >= 512 * MIB_BYTES else "failed"
     add(
         "memory", "内存容量", memory_status, f"物理内存 {format_bytes(memory_total)}",
-        "低于 1 GiB 时仅建议运行少量 Alpine 容器" if memory_status == "warning" else "",
+        "切割小机至少需要 512 MiB 物理内存；保留内存可最低设置为 128 MiB" if memory_status == "failed" else "",
     )
     storage_driver = str(pool.get("driver", "未知"))
-    storage_status = "passed" if disk_free >= 2 * GIB_BYTES else "failed"
+    storage_status = "passed" if disk_free >= 3 * GIB_BYTES else "failed"
     add(
         "storage", "default 存储池", storage_status,
         f"{storage_driver} · 可用 {format_bytes(disk_free)} / {format_bytes(disk_total)}",
-        "释放磁盘空间，确保至少保留 2 GiB" if storage_status == "failed" else "",
+        "释放磁盘空间，确保 default 存储池至少有 3 GiB 可用" if storage_status == "failed" else "",
     )
-    network_status = "passed" if network.get("managed", True) else "warning"
+    network_status = "passed" if network.get("managed", False) else "failed"
     add(
         "network", "incusbr0 实例网络", network_status,
         "托管 NAT 网桥可用" if network_status == "passed" else "网桥存在但不由 Incus 管理",
-        "建议使用 bootstrap-node.sh 重新创建托管 NAT 网桥" if network_status == "warning" else "",
+        "使用 bootstrap-node.sh 重新创建托管 NAT 网桥" if network_status == "failed" else "",
     )
-    kvm_value = str(config.get("user.incus-cn-panel.kvm", "unknown")).lower()
-    vm_ready = kvm_value == "true"
+    reserve_policy = effective_node_reserves(node, memory_total, disk_total, cpu_total)
+    cpu_budget = host_cpu_budget_percent(cpu_total, reserve_policy["cpu_reserve_percent"])
+    memory_available = max(
+        0, memory_total - memory_used - reserve_policy["memory_reserve_bytes"]
+    )
+    disk_available = max(0, disk_free - reserve_policy["disk_reserve_bytes"])
+    light_capacity_ready = (
+        cpu_budget >= 25
+        and memory_available >= 128 * MIB_BYTES
+        and disk_available >= 2 * GIB_BYTES
+    )
     add(
-        "kvm", "KVM 虚拟化", "passed" if vm_ready else "warning",
-        "宿主机已确认提供 /dev/kvm" if vm_ready else "尚未确认 /dev/kvm，可正常创建 LXC",
-        "升级节点脚本或在确认嵌套虚拟化后设置 Incus 服务器标记" if not vm_ready else "",
+        "safe_capacity", "最小实例安全容量",
+        "passed" if light_capacity_ready else "failed",
+        (
+            f"保留宿主资源后可分配 CPU {cpu_budget}%、内存 {format_bytes(memory_available)}、"
+            f"磁盘 {format_bytes(disk_available)}"
+        ),
+        "在宿主机保留策略中合理下调保留值，或释放宿主机内存和磁盘后重试"
+        if not light_capacity_ready else "",
+    )
+    probe_verified = False
+    if probe and not any(item["status"] == "failed" for item in checks):
+        probe_verified, probe_detail = probe_node_container(node)
+        add(
+            "container_probe", "实例创建实测",
+            "passed" if probe_verified else "failed", probe_detail,
+            "检查镜像网络、内核 LXC 能力、存储池和 AppArmor 后重新体检"
+            if not probe_verified else "",
+        )
+    kvm_value = str(config.get("user.incus-cn-panel.kvm", "unknown")).lower()
+    vm_marker_ready = kvm_value == "true"
+    vm_capacity_ready = (
+        cpu_budget >= 100
+        and memory_available >= 512 * MIB_BYTES
+        and disk_available >= 2 * GIB_BYTES
+    )
+    vm_probe_verified = False
+    if not vm_marker_ready:
+        vm_detail = "宿主机没有可用的 /dev/kvm，仅支持 LXC"
+    elif not vm_capacity_ready:
+        vm_detail = (
+            "检测到 /dev/kvm，但安全资源不足：KVM 至少需要 1 核可分配 CPU、"
+            "512 MiB 可分配内存和 2 GiB 可分配磁盘"
+        )
+    else:
+        vm_detail = "宿主机已确认提供 /dev/kvm 且安全容量充足"
+    if probe and probe_verified and vm_marker_ready and vm_capacity_ready:
+        vm_probe_verified, vm_detail = probe_node_virtual_machine(node)
+    vm_ready = vm_marker_ready and vm_capacity_ready and (vm_probe_verified if probe else True)
+    add(
+        "kvm", "KVM 虚拟化实测", "passed" if vm_ready else "warning", vm_detail,
+        "当前宿主机只能切 LXC；需要服务商开放嵌套虚拟化和 /dev/kvm 才能创建 KVM"
+        if not vm_ready else "",
     )
     failed = sum(item["status"] == "failed" for item in checks)
     warnings = sum(item["status"] == "warning" for item in checks)
     status = "failed" if failed else "warning" if warnings else "healthy"
     score = max(0, 100 - failed * 35 - warnings * 10)
+    reasons = [item["detail"] for item in checks if item["status"] == "failed"]
+    memory_capacity = memory_available // (128 * MIB_BYTES)
+    disk_capacity = disk_available // (2 * GIB_BYTES)
+    cpu_capacity = cpu_budget // 25
+    eligible = not failed and (probe_verified if probe else True)
+    estimated_light_instances = min(memory_capacity, disk_capacity, cpu_capacity) if eligible else 0
+    admission_summary = (
+        f"符合切割小机标准，预计可创建 {estimated_light_instances} 台 128M 轻量实例"
+        if eligible else "不符合切割小机标准：" + "；".join(reasons[:3])
+    )
     report = {
         "node": node, "status": status, "score": score, "checked_at": checked_at,
         "summary": "存在阻断项" if failed else "可接入，存在建议项" if warnings else "全部检查通过",
         "checks": checks,
-        "capabilities": {"containers": not failed, "virtual_machines": not failed and vm_ready},
+        "capabilities": {"containers": eligible, "virtual_machines": eligible and vm_ready},
+        "admission": {
+            "eligible": eligible,
+            "probe_verified": probe_verified,
+            "kvm_probe_verified": vm_probe_verified,
+            "summary": admission_summary,
+            "reasons": reasons,
+            "minimum": {
+                "cpu": "1 个逻辑核心",
+                "memory": "512 MiB 物理内存",
+                "disk_free": "3 GiB default 可用空间",
+                "network": "托管 incusbr0 NAT 网络",
+            },
+            "estimated_light_instances": estimated_light_instances,
+        },
         "facts": {
             "incus_version": version,
             "kernel": str(environment.get("kernel_version", "")),
             "architecture": str((resources.get("cpu") or {}).get("architecture", "")),
             "cpu": cpu_total,
             "memory": memory_total,
+            "memory_used": memory_used,
             "disk_free": disk_free,
             "storage_driver": storage_driver,
         },
     }
     return save_node_health(report)
+
+
+def ensure_node_admitted(node, kind="container", run_probe_if_needed=True):
+    node = require_node(node)
+    report = read_node_health(node)
+    admission = report.get("admission", {}) if isinstance(report, dict) else {}
+    if run_probe_if_needed and not admission.get("probe_verified"):
+        report = node_preflight(node, probe=True)
+        admission = report.get("admission", {})
+    if not admission.get("eligible"):
+        reasons = admission.get("reasons") or [report.get("summary", "宿主机体检未通过")]
+        detail = "；".join(str(item) for item in reasons[:3])
+        raise ValueError(
+            "该宿主机未通过切割小机准入体检："
+            f"{detail}。最低标准：1 核 CPU、512 MiB 物理内存、"
+            "default 存储池至少 3 GiB 可用空间、托管 incusbr0 网络"
+        )
+    capabilities = report.get("capabilities", {})
+    if kind == "virtual-machine" and not capabilities.get("virtual_machines"):
+        raise ValueError(
+            "该宿主机已通过 LXC 检测，但未通过 KVM 实测。"
+            "服务商可能未开放嵌套虚拟化或 /dev/kvm，请改用 LXC 系统容器"
+        )
+    return report
 
 
 def _resource_tier(value, minimum, tiers):
@@ -2231,7 +2537,7 @@ def scheduler_plan(node_info, count, kind, image_id, strategy="balanced"):
         raise ValueError("计划实例数量必须在 1 到 10000 之间")
     if kind not in {"container", "virtual-machine"}:
         raise ValueError("实例类型无效")
-    if strategy not in {"stable", "balanced", "density"}:
+    if strategy not in PROXY_CONTAINER_PRESETS:
         raise ValueError("资源策略无效")
     image = PUBLIC_IMAGE_MAP.get(str(image_id))
     family = image["family"] if image else image_family(str(image_id))
@@ -2263,12 +2569,13 @@ def scheduler_plan(node_info, count, kind, image_id, strategy="balanced"):
         memory_tiers = [value * MIB_BYTES for value in memory_tiers]
         disk_tiers = [2, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 80, 100, 128, 160, 200, 256, 320, 512, 1024]
         disk_tiers = [value * GIB_BYTES for value in disk_tiers]
-        factor = {"density": 0.35, "balanced": 0.60, "stable": 0.80}[strategy]
+        vm_strategy = strategy if strategy in {"density", "balanced", "stable"} else "stable"
+        factor = {"density": 0.35, "balanced": 0.60, "stable": 0.80}[vm_strategy]
         memory_target = minimum_memory if strategy == "density" else max(recommended_memory, int(memory_share * factor))
         disk_target = minimum_disk if strategy == "density" else max(recommended_disk, int(disk_share * factor))
         memory = _resource_tier(min(memory_share, memory_target), minimum_memory, memory_tiers)
         disk = _resource_tier(min(disk_share, disk_target), minimum_disk, disk_tiers)
-        cpu_factor = {"density": 0.50, "balanced": 0.70, "stable": 0.85}[strategy]
+        cpu_factor = {"density": 0.50, "balanced": 0.70, "stable": 0.85}[vm_strategy]
         cpu_commitment = max(1, int(cpu_share * cpu_factor / 5) * 5)
         cpu = max(1, min(host_cpu, 8, cpu_commitment // 100))
         cpu_allowance = 0
@@ -2578,13 +2885,16 @@ def remove_traffic_usage(node, name=None):
     with TRAFFIC_LOCK:
         data = _read_private_json(TRAFFIC_FILE, default_traffic_data())
         records = data.setdefault("instances", {})
+        removed = False
         if name is None:
             prefix = f"{node}/"
             for key in [key for key in records if key.startswith(prefix)]:
                 records.pop(key, None)
+                removed = True
         else:
-            records.pop(_traffic_key(node, name), None)
+            removed = records.pop(_traffic_key(node, name), None) is not None
         _write_traffic_data(data)
+    return removed
 
 
 def traffic_quota_status(node, name, config=None):
@@ -4253,6 +4563,9 @@ def delete_domain_route(route_id):
 def task_create_instance(context, payload):
     name = str(payload.get("name", ""))
     context.update(5, "检查配置", "正在复核宿主机容量、名称和端口")
+    ensure_node_admitted(
+        str(payload.get("node", "")), str(payload.get("type", "container"))
+    )
     context.update(18, "创建实例", "正在下载镜像并创建 Incus 实例")
     node, name, _access = create_instance(payload, validate_capacity=True)
     context.update(92, "验证 SSH", "实例已启动，正在确认连接信息", check_cancelled=False)
@@ -4268,6 +4581,9 @@ def task_create_batch(context, payload):
     except (TypeError, ValueError):
         total = 0
     context.update(3, "批量预检", "正在锁定名称、资源和端口计划")
+    ensure_node_admitted(
+        str(payload.get("node", "")), str(payload.get("type", "container"))
+    )
 
     def progress(done, count, name):
         value = 8 + int(done / max(1, count) * 86)
@@ -4284,7 +4600,7 @@ def task_create_batch(context, payload):
 def task_node_preflight(context, payload):
     node = str(payload.get("node", ""))
     context.update(10, "连接宿主机", "正在读取 Incus API 和硬件资源")
-    report = node_preflight(node)
+    report = node_preflight(node, probe=True)
     context.update(90, "生成体检报告", report["summary"])
     return {
         "message": f"{node} 体检完成：{report['summary']}",
@@ -4335,6 +4651,7 @@ def _remove_domain_routes_for_instance(node, name):
         if len(data["routes"]) != before:
             data["apply"] = write_caddy_routes(data)
             _write_private_json(DOMAINS_FILE, data)
+        return before - len(data["routes"])
 
 
 def task_instance_delete(context, payload):
@@ -4342,11 +4659,32 @@ def task_instance_delete(context, payload):
     context.update(10, "确认实例", "正在确认实例仍然存在")
     context.update(35, "永久删除", "正在删除实例及其快照")
     run_incus("delete", ref, "--force", timeout=600)
-    delete_credentials(node, name)
-    remove_instance_assignments(node, name)
-    remove_traffic_usage(node, name)
-    _remove_domain_routes_for_instance(node, name)
-    return {"message": f"实例 {name} 已永久删除", "node": node, "name": name}
+    context.update(70, "核验释放", "正在确认根磁盘、快照和代理端口设备已移除")
+    verification_error = ""
+    try:
+        remaining = json.loads(run_incus("list", f"{node}:", "--format=json", timeout=30))
+        if any(item.get("name") == name for item in remaining):
+            verification_error = "Incus 实例列表中仍存在同名实例"
+    except Exception as exc:
+        verification_error = f"无法读取删除后的 Incus 实例列表：{str(exc)[-500:]}"
+    context.update(82, "清理控制记录", "正在清理 SSH 凭据、用户授权、流量和域名规则")
+    cleanup = {
+        "incus_instance_absent": not verification_error,
+        "credentials_removed": delete_credentials(node, name),
+        "assignments_removed": remove_instance_assignments(node, name),
+        "traffic_record_removed": remove_traffic_usage(node, name),
+        "domain_routes_removed": _remove_domain_routes_for_instance(node, name),
+        "shared_image_cache_retained": True,
+    }
+    if verification_error:
+        raise RuntimeError(
+            f"实例删除命令已执行，但删除后核验失败：{verification_error}。"
+            "面板侧凭据、授权、流量和域名记录已清理，请在宿主机执行 incus list 复核"
+        )
+    return {
+        "message": f"实例 {name} 已永久删除，宿主机资源和端口已释放",
+        "node": node, "name": name, "cleanup": cleanup,
+    }
 
 
 def task_snapshot_create(context, payload):
@@ -4940,7 +5278,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 data = self.read_json()
-                node_info = live_node_info(str(data.get("node", "")))
+                node_name = str(data.get("node", ""))
+                ensure_node_admitted(node_name, str(data.get("type", "container")))
+                node_info = live_node_info(node_name)
                 plan = scheduler_plan(
                     node_info, data.get("count", 1), str(data.get("type", "container")),
                     str(data.get("image", "")), str(data.get("strategy", "balanced")),
@@ -4977,6 +5317,26 @@ class Handler(BaseHTTPRequestHandler):
                     payload={"node": node}, owner=auth[1]["username"],
                 )
                 self.send_json(202, {"ok": True, "task": task})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        node_settings_match = re.fullmatch(r"/api/nodes/([^/]+)/settings", path)
+        if node_settings_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            node = node_settings_match.group(1)
+            try:
+                settings = update_node_settings(node, self.read_json())
+                record_operation(
+                    "node_settings", node, node,
+                    message=(
+                        f"CPU 保留 {settings['cpu_reserve_percent']}% · "
+                        f"内存保留 {format_bytes(settings['memory_reserve_bytes'])} · "
+                        f"磁盘保留 {format_bytes(settings['disk_reserve_bytes'])}"
+                    ),
+                )
+                self.send_json(200, {"ok": True, "settings": settings})
             except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
             return
@@ -5256,9 +5616,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("节点名称只能包含字母、数字和连字符")
                 if not 20 <= len(token) <= 12000:
                     raise ValueError("Trust Token 无效")
-                add_remote(name, address, token)
-                record_operation("node_add", name, name, message=address)
-                self.send_json(201, {"ok": True})
+                report = add_remote(name, address, token)
+                result = "符合切割标准" if report.get("admission", {}).get("eligible") else "未通过切割准入"
+                record_operation("node_add", name, name, message=f"{address} · {result}")
+                self.send_json(201, {"ok": True, "preflight": report})
             except NodeConnectionError as exc:
                 record_operation(
                     "node_add", name or "未知节点", name, "failed",
@@ -5470,6 +5831,7 @@ class Handler(BaseHTTPRequestHandler):
                 delete_credentials(node)
                 remove_instance_assignments(node)
                 remove_traffic_usage(node)
+                delete_node_settings(node)
                 record_operation("node_remove", node, node)
                 self.send_json(200, {"ok": True})
             except Exception as exc:
