@@ -61,6 +61,18 @@
     .btn.small { min-height:31px; padding:4px 9px; font-size:13px; }
     .btn:disabled { cursor:not-allowed; opacity:.5; }
     .error { min-height:21px; margin-top:11px; color:var(--red); white-space:pre-wrap; }
+    .node-connection-feedback { min-height:0; margin:0; }
+    .node-diagnostic { overflow:hidden; color:var(--ink); background:var(--red-soft); border:1px solid #e8b8ae; border-left:3px solid var(--red); border-radius:4px; white-space:normal; }
+    .node-diagnostic.pending { background:var(--blue-soft); border-color:#c4b9fa; border-left-color:var(--blue); }
+    .node-diagnostic.pending .node-diagnostic-head > svg { animation:instance-action-spin .8s linear infinite; }
+    .node-diagnostic-head { display:grid; grid-template-columns:28px minmax(0,1fr); gap:9px; align-items:start; padding:12px 13px; }
+    .node-diagnostic-head svg { width:19px; height:19px; margin-top:1px; }
+    .node-diagnostic-head strong,.node-diagnostic-head span { display:block; }
+    .node-diagnostic-head span { margin-top:2px; color:var(--muted); font-size:11px; }
+    .node-diagnostic-stage { color:var(--red); font-size:10px; font-weight:750; }
+    .node-diagnostic-detail { margin:0; padding:10px 13px; color:#5e5366; background:rgba(255,255,255,.55); border-top:1px solid currentColor; font:10px/1.55 var(--mono-font); overflow-wrap:anywhere; white-space:pre-wrap; }
+    .node-diagnostic-hints { margin:0; padding:10px 13px 11px 30px; border-top:1px solid rgba(179,65,54,.2); font-size:11px; }
+    .node-diagnostic-hints li + li { margin-top:4px; }
     .topbar { position:fixed; z-index:20; top:0; right:0; left:0; height:60px; display:flex; align-items:center; justify-content:space-between; padding:0 22px; background:#fff; border-bottom:1px solid var(--line); }
     .top-actions { display:flex; align-items:center; gap:8px; }
     .account-button { color:#344054; }
@@ -712,7 +724,7 @@
             <div class="grid3"><div class="field"><label for="nodeName">宿主机名称</label><input id="nodeName" pattern="[A-Za-z0-9][A-Za-z0-9-]{0,62}" placeholder="例如 node-hk-01" required></div><div class="field"><label for="nodeHost">服务器 IP 或域名</label><input id="nodeHost" placeholder="例如 203.0.113.10" required></div><div class="field"><label for="nodePort">Incus 服务端口</label><input id="nodePort" type="number" min="1" max="65535" value="8443" required></div></div>
             <div class="field"><label for="nodeToken">安装输出 / Trust Token</label><textarea id="nodeToken" spellcheck="false" placeholder="节点地址: https://203.0.113.10:8443&#10;Trust Token: ..." required></textarea></div>
             <div class="capacity-strip capacity-strip-four"><div class="capacity-item"><span>实例网络</span><strong>incusbr0 · NAT</strong></div><div class="capacity-item"><span>存储池</span><strong>default</strong></div><div class="capacity-item"><span>连接方式</span><strong>双向 TLS</strong></div><div class="capacity-item"><span>宿主机密码</span><strong>不会保存</strong></div></div>
-            <div id="nodeError" class="error"></div>
+            <div id="nodeError" class="error node-connection-feedback" aria-live="polite"></div>
             <div class="connect-actions"><button type="button" class="btn" data-go="nodes">取消</button><button type="submit" class="btn primary" id="nodeSubmit"><i data-lucide="shield-check"></i>验证并添加</button></div>
           </form>
         </div>
@@ -861,7 +873,7 @@
     const speed=value=>{value=Number(value||0);if(value>=1073741824)return(value/1073741824).toFixed(1)+' GiB/s';if(value>=1048576)return(value/1048576).toFixed(1)+' MiB/s';if(value>=1024)return(value/1024).toFixed(1)+' KiB/s';return Math.round(value)+' B/s';};
     const formBytes=(value,unit)=>Number(value||0)*(unit==='GiB'?1073741824:1048576);
     const pct=(used,total)=>total?Math.min(100,Math.round(used/total*100)):0;
-    async function api(path,options={}){options.headers={'Content-Type':'application/json',...(options.headers||{})};if(csrf)options.headers['X-CSRF-Token']=csrf;const response=await fetch(apiBase+path,options);const data=await response.json().catch(()=>({error:'服务器返回了无效响应'}));if(response.status===401)showLogin();if(!response.ok)throw new Error(data.error||'请求失败');return data;}
+    async function api(path,options={}){options.headers={'Content-Type':'application/json',...(options.headers||{})};if(csrf)options.headers['X-CSRF-Token']=csrf;const response=await fetch(apiBase+path,options);const data=await response.json().catch(()=>({error:'服务器返回了无效响应'}));if(response.status===401)showLogin();if(!response.ok){const error=new Error(data.error||'请求失败');error.data=data;error.status=response.status;throw error;}return data;}
     const isAdmin=()=>currentAccount.role==='admin';
     function setLoginError(message='',kind='error'){const box=$('loginError'),icon=iconSvg(kind==='success'?'circle-check':'circle-alert');$('loginErrorText').textContent=message;if(icon)box.firstElementChild.outerHTML=icon;box.classList.toggle('success',kind==='success');box.classList.toggle('hidden',!message);}
     function showLogin(message='',kind='error'){authEpoch++;clearTimeout(updatePollTimer);stopNodeLivePolling();nodeLiveSamples.clear();if($('adminAccountDialog').open)$('adminAccountDialog').close();$('sessionGate').classList.add('hidden');$('app').classList.add('hidden');$('login').classList.remove('hidden');$('password').value='';setLoginError(message,kind);requestAnimationFrame(()=>($('username').value?$('password'):$('username')).focus());}
@@ -1131,8 +1143,10 @@
     $('closeImageUpload').onclick=()=>{if(!imageUploadRequest)$('imageUploadDialog').close();};
     $('cancelImageUpload').onclick=()=>{if(imageUploadRequest)imageUploadRequest.abort();else $('imageUploadDialog').close();};
     function nodeConnection(){let raw=$('nodeToken').value.trim(),host=$('nodeHost').value.trim(),port=$('nodePort').value;const addressMatch=raw.match(/节点地址\s*[:：]\s*(https:\/\/\S+)/i),tokenMatch=raw.match(/Trust Token\s*[:：]\s*(\S+)/i);if(addressMatch){try{const address=new URL(addressMatch[1]);host=address.hostname.replace(/^\[|\]$/g,'');port=address.port||8443;$('nodeHost').value=host;$('nodePort').value=port;}catch{}}if(tokenMatch){raw=tokenMatch[1];$('nodeToken').value=raw;}if(host.includes('://')){const address=new URL(host);host=address.hostname.replace(/^\[|\]$/g,'');port=address.port||port;}const addressHost=host.includes(':')?`[${host}]`:host;return{address:`https://${addressHost}:${port}`,token:raw};}
+    function renderNodeConnectionProgress(address){$('nodeError').innerHTML=`<div class="node-diagnostic pending"><div class="node-diagnostic-head"><i data-lucide="loader-circle"></i><div><strong>正在连接并验证宿主机</strong><span>${esc(address)} · 建立信任后检查 API、资源、存储池和实例网络</span></div></div></div>`;icons();}
+    function renderNodeConnectionError(error){const data=error.data||{},stage=data.stage||'输入检查',detail=data.detail||'',hints=Array.isArray(data.hints)?data.hints:[];$('nodeError').innerHTML=`<div class="node-diagnostic"><div class="node-diagnostic-head"><i data-lucide="circle-alert"></i><div><span class="node-diagnostic-stage">失败阶段 · ${esc(stage)}</span><strong>${esc(data.error||error.message||'宿主机添加失败')}</strong></div></div>${detail?`<pre class="node-diagnostic-detail">${esc(detail)}</pre>`:''}${hints.length?`<ul class="node-diagnostic-hints">${hints.map(hint=>`<li>${esc(hint)}</li>`).join('')}</ul>`:''}</div>`;icons();}
     $('nodeToken').addEventListener('paste',()=>setTimeout(nodeConnection));
-    $('nodeForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('nodeSubmit'),connection=nodeConnection();button.disabled=true;button.textContent='正在验证...';$('nodeError').textContent='';try{await api('/api/nodes',{method:'POST',body:JSON.stringify({name:$('nodeName').value,address:connection.address,token:connection.token})});$('nodeForm').reset();toast('宿主机添加成功');await load();showView('nodes');}catch(err){$('nodeError').textContent=err.message;}finally{button.disabled=false;button.innerHTML='<i data-lucide="shield-check"></i>验证并添加';icons();}});
+    $('nodeForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('nodeSubmit'),connection=nodeConnection();button.disabled=true;button.textContent='正在验证...';renderNodeConnectionProgress(connection.address);try{await api('/api/nodes',{method:'POST',body:JSON.stringify({name:$('nodeName').value,address:connection.address,token:connection.token})});$('nodeForm').reset();$('nodeError').textContent='';toast('宿主机添加成功');await load();showView('nodes');}catch(err){renderNodeConnectionError(err);}finally{button.disabled=false;button.innerHTML='<i data-lucide="shield-check"></i>验证并添加';icons();}});
     const smartResourceFields=new Set(['cpu','cpuAllowance','memoryValue','memoryUnit','diskValue','diskUnit']);
     $('createForm').addEventListener('input',event=>{if(smartResourceFields.has(event.target.id))markSmartCustomized();updateSummary();});$('createForm').addEventListener('change',event=>{if(smartResourceFields.has(event.target.id))markSmartCustomized();updateSummary();});
     $('batchCount').addEventListener('input',()=>applySmartConfiguration({selectImage:!smartImageLocked}));

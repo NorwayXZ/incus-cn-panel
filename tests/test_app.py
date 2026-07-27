@@ -22,7 +22,7 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.6.5")
+        self.assertEqual(app.APP_VERSION, "1.6.6")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
         response.read.return_value = b"1.7.0\n"
@@ -115,7 +115,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "1.6.5")
+                self.assertEqual(data["panel_version"], "1.6.6")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -968,6 +968,9 @@ class ValidationTests(unittest.TestCase):
         self.assertNotIn("icons();load();", app.HTML)
         self.assertIn("切割实例", app.HTML)
         self.assertIn("添加宿主机", app.HTML)
+        self.assertIn("renderNodeConnectionError", app.HTML)
+        self.assertIn("失败阶段", app.HTML)
+        self.assertIn("API、资源、存储池和实例网络", app.HTML)
         self.assertIn("月流量配额", app.HTML)
         self.assertIn('id="applySmartPlan"', app.HTML)
         self.assertIn('id="smartPlanText"', app.HTML)
@@ -1067,7 +1070,7 @@ class ValidationTests(unittest.TestCase):
 
     @mock.patch("app.registered_remotes", return_value={})
     @mock.patch("app.run_incus")
-    def test_add_remote_uses_token_before_setting_explicit_url(self, run_incus, _):
+    def test_add_remote_uses_explicit_address_and_checks_node_requirements(self, run_incus, _):
         app.add_remote(
             "node-hk-01",
             "https://203.0.113.10:8443",
@@ -1076,9 +1079,14 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(
             run_incus.call_args_list,
             [
-                mock.call("remote", "add", "node-hk-01", "one-time-trust-token", timeout=90),
-                mock.call("remote", "set-url", "node-hk-01", "https://203.0.113.10:8443", timeout=20),
+                mock.call(
+                    "remote", "add", "node-hk-01", "https://203.0.113.10:8443",
+                    "--token", "one-time-trust-token", "--accept-certificate", timeout=90,
+                ),
                 mock.call("query", "node-hk-01:/1.0", timeout=20),
+                mock.call("query", "node-hk-01:/1.0/resources", timeout=20),
+                mock.call("query", "node-hk-01:/1.0/storage-pools/default", timeout=20),
+                mock.call("query", "node-hk-01:/1.0/networks/incusbr0", timeout=20),
             ],
         )
 
@@ -1086,16 +1094,39 @@ class ValidationTests(unittest.TestCase):
     @mock.patch("app.run_incus")
     def test_add_remote_rolls_back_failed_health_check(self, run_incus, _):
         run_incus.side_effect = [None, None, RuntimeError("offline"), None]
-        with self.assertRaisesRegex(RuntimeError, "offline"):
+        with self.assertRaises(app.NodeConnectionError) as context:
             app.add_remote(
                 "node-hk-01",
                 "https://203.0.113.10:8443",
                 "one-time-trust-token",
             )
+        self.assertEqual(context.exception.stage, "资源检查")
+        self.assertEqual(context.exception.detail, "offline")
         self.assertEqual(
             run_incus.call_args_list[-1],
             mock.call("remote", "remove", "node-hk-01", timeout=20),
         )
+
+    def test_node_connection_failure_is_actionable_and_redacts_token(self):
+        token = "secret-one-time-token-value"
+        error = app.node_connection_failure(
+            "连接与信任",
+            RuntimeError(f"Failed to create certificate: token has expired {token}"),
+            token,
+            "https://203.0.113.10:8443",
+        )
+        payload = error.payload()
+        self.assertEqual(payload["stage"], "连接与信任")
+        self.assertIn("Trust Token 已失效", payload["error"])
+        self.assertNotIn(token, payload["detail"])
+        self.assertIn("***", payload["detail"])
+        self.assertGreaterEqual(len(payload["hints"]), 2)
+
+        dns = app.node_connection_failure(
+            "连接与信任", RuntimeError("dial tcp: no such host"),
+            "", "https://missing.example:8443",
+        )
+        self.assertEqual(dns.summary, "无法解析宿主机地址")
 
     def test_parse_instances_includes_resource_and_access_metadata(self):
         instances = app.parse_instances("node-hk-01", [{

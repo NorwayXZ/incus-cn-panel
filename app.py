@@ -695,17 +695,122 @@ def require_node(name):
     return name
 
 
+class NodeConnectionError(RuntimeError):
+    def __init__(self, stage, summary, detail="", hints=None, status=502):
+        super().__init__(summary)
+        self.stage = stage
+        self.summary = summary
+        self.detail = detail
+        self.hints = list(hints or [])
+        self.status = status
+
+    def payload(self):
+        return {
+            "error": self.summary,
+            "stage": self.stage,
+            "detail": self.detail,
+            "hints": self.hints,
+        }
+
+
+def node_connection_failure(stage, exc, token="", address=""):
+    detail = str(exc).strip() or "Incus 未返回具体错误"
+    if token:
+        detail = detail.replace(token, "***")
+    detail = detail[-1000:]
+    lowered = detail.lower()
+    common_hints = [
+        f"确认控制面板服务器能够访问 {address}",
+        "确认宿主机防火墙和云安全组已放行 Incus TCP 端口",
+    ]
+    if isinstance(exc, subprocess.TimeoutExpired) or "timed out" in lowered or "timeout" in lowered:
+        return NodeConnectionError(
+            stage, "连接宿主机超时", detail,
+            common_hints + ["确认 Incus 服务正在运行并监听外网地址"], 504,
+        )
+    if any(value in lowered for value in ("connection refused", "actively refused")):
+        return NodeConnectionError(
+            stage, "Incus 端口拒绝连接", detail,
+            common_hints + ["在宿主机执行 systemctl status incus 检查服务状态"],
+        )
+    if any(value in lowered for value in ("no route to host", "network is unreachable")):
+        return NodeConnectionError(
+            stage, "控制面板无法到达宿主机", detail,
+            common_hints + ["检查公网 IP、路由和服务商网络 ACL"],
+        )
+    if any(value in lowered for value in (
+        "no such host", "name or service not known", "nodename nor servname provided",
+    )):
+        return NodeConnectionError(
+            stage, "无法解析宿主机地址", detail,
+            ["检查填写的域名或 IP 是否正确", "若使用域名，请确认控制面板服务器的 DNS 解析正常"],
+        )
+    if "certificate fingerprint mismatch" in lowered:
+        return NodeConnectionError(
+            stage, "Token 与目标宿主机的 TLS 证书不匹配", detail,
+            ["确认填写的是生成该 Token 的同一台宿主机", "在目标宿主机重新生成 Trust Token 后重试"],
+        )
+    if any(value in lowered for value in (
+        "invalid trust token", "token has expired", "token is expired",
+        "certificate add token", "failed to create certificate", "not authorized",
+        "authentication failure", "server doesn't trust us",
+    )):
+        return NodeConnectionError(
+            stage, "Trust Token 已失效、已使用或不属于该宿主机", detail,
+            ["Trust Token 通常只能使用一次，请在宿主机重新生成", "生成后尽快粘贴完整 Token 再试"],
+        )
+    summaries = {
+        "控制端检查": "控制面板的 Incus 客户端不可用",
+        "连接与信任": "无法连接宿主机或建立 TLS 信任",
+        "API 验证": "已建立信任，但 Incus API 验证失败",
+        "资源检查": "Incus 无法读取宿主机资源信息",
+        "存储检查": "宿主机缺少可用的 default 存储池",
+        "网络检查": "宿主机缺少可用的 incusbr0 实例网络",
+    }
+    hints = common_hints
+    if stage == "存储检查":
+        hints = ["在宿主机执行 incus storage list", "确认存在名为 default 且状态正常的存储池"]
+    elif stage == "网络检查":
+        hints = ["在宿主机执行 incus network list", "确认存在名为 incusbr0 的托管 NAT 网桥"]
+    elif stage == "控制端检查":
+        hints = ["检查控制面板服务日志", "确认 /usr/bin/incus 和面板 Incus 客户端配置可用"]
+    return NodeConnectionError(stage, summaries.get(stage, "宿主机验证失败"), detail, hints)
+
+
 def add_remote(name, address, token):
     with REMOTE_CONFIG_LOCK:
-        if name in registered_remotes():
-            raise ValueError("节点名称已经存在")
-        run_incus("remote", "add", name, token, timeout=90)
         try:
-            run_incus("remote", "set-url", name, address, timeout=20)
-            run_incus("query", f"{name}:/1.0", timeout=20)
-        except Exception:
-            run_incus("remote", "remove", name, timeout=20)
-            raise
+            remotes = registered_remotes()
+        except Exception as exc:
+            raise node_connection_failure("控制端检查", exc, token, address) from exc
+        if name in remotes:
+            raise ValueError("节点名称已经存在")
+        try:
+            run_incus(
+                "remote", "add", name, address, "--token", token,
+                "--accept-certificate", timeout=90,
+            )
+        except Exception as exc:
+            try:
+                run_incus("remote", "remove", name, timeout=20)
+            except Exception:
+                pass
+            raise node_connection_failure("连接与信任", exc, token, address) from exc
+        checks = (
+            ("API 验证", ("query", f"{name}:/1.0")),
+            ("资源检查", ("query", f"{name}:/1.0/resources")),
+            ("存储检查", ("query", f"{name}:/1.0/storage-pools/default")),
+            ("网络检查", ("query", f"{name}:/1.0/networks/incusbr0")),
+        )
+        for stage, command in checks:
+            try:
+                run_incus(*command, timeout=20)
+            except Exception as exc:
+                try:
+                    run_incus("remote", "remove", name, timeout=20)
+                except Exception:
+                    pass
+                raise node_connection_failure(stage, exc, token, address) from exc
 
 
 def format_bytes(value):
@@ -3170,9 +3275,12 @@ class Handler(BaseHTTPRequestHandler):
                 add_remote(name, address, token)
                 record_operation("node_add", name, name, message=address)
                 self.send_json(201, {"ok": True})
-            except subprocess.TimeoutExpired:
-                record_operation("node_add", name or "未知节点", name, "failed", "连接超时")
-                self.send_json(504, {"error": "连接节点超时，请检查地址和防火墙"})
+            except NodeConnectionError as exc:
+                record_operation(
+                    "node_add", name or "未知节点", name, "failed",
+                    f"{exc.stage}: {exc.summary}; {exc.detail}"[:1000],
+                )
+                self.send_json(exc.status, exc.payload())
             except Exception as exc:
                 record_operation("node_add", name or "未知节点", name, "failed", str(exc))
                 self.send_json(400, {"error": str(exc)})
