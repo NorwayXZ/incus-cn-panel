@@ -22,13 +22,13 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.6.6")
+        self.assertEqual(app.APP_VERSION, "1.7.0")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"1.7.0\n"
+        response.read.return_value = b"1.8.0\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "1.7.0")
+            self.assertEqual(app.fetch_latest_version(), "1.8.0")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -37,10 +37,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "1.7.0",
+            "status": "running", "target_version": "1.8.0",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "1.7.0")
+        self.assertEqual(payload["latest_version"], "1.8.0")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -56,7 +56,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("1.7.0")
+                    status = app.start_panel_update("1.8.0")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -64,7 +64,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "1.7.0")
+                self.assertEqual(saved["target_version"], "1.8.0")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -115,7 +115,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "1.6.6")
+                self.assertEqual(data["panel_version"], "1.7.0")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -971,6 +971,10 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("renderNodeConnectionError", app.HTML)
         self.assertIn("失败阶段", app.HTML)
         self.assertIn("API、资源、存储池和实例网络", app.HTML)
+        self.assertIn("任务中心", app.HTML)
+        self.assertIn("renderTasks", app.HTML)
+        self.assertIn('id="resourceStrategy"', app.HTML)
+        self.assertIn("状态一致性", app.HTML)
         self.assertIn("月流量配额", app.HTML)
         self.assertIn('id="applySmartPlan"', app.HTML)
         self.assertIn('id="smartPlanText"', app.HTML)
@@ -1127,6 +1131,116 @@ class ValidationTests(unittest.TestCase):
             "", "https://missing.example:8443",
         )
         self.assertEqual(dns.summary, "无法解析宿主机地址")
+
+    def test_task_queue_persists_progress_and_hides_private_payload(self):
+        old_values = (app.DATA_DIR, app.TASKS_FILE, app.OPERATIONS_FILE, app.TASK_EXECUTOR)
+        task_type = "test_persisted_task"
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.TASKS_FILE = os.path.join(directory, "tasks.json")
+                app.OPERATIONS_FILE = os.path.join(directory, "operations.jsonl")
+                app.TASK_EXECUTOR = app.ThreadPoolExecutor(max_workers=1)
+
+                def runner(context, payload):
+                    context.update(55, "执行测试", "正在验证持久化")
+                    return {"message": "测试完成", "value": payload["value"]}
+
+                app.TASK_RUNNERS[task_type] = runner
+                task = app.enqueue_task(
+                    task_type, "持久化测试", target="target-a",
+                    payload={"value": 7, "secret": "private"}, owner="admin",
+                )
+                for _ in range(100):
+                    completed = app.get_task(task["id"], private=True)
+                    if completed and completed["status"] == "complete":
+                        break
+                    app.time.sleep(0.01)
+                self.assertEqual(completed["status"], "complete")
+                self.assertEqual(completed["result"]["value"], 7)
+                self.assertNotIn("payload", app.get_task(task["id"]))
+                self.assertEqual(app.list_tasks({"role": "admin"})[0]["progress"], 100)
+        finally:
+            executor = app.TASK_EXECUTOR
+            if executor and executor is not old_values[3]:
+                executor.shutdown(wait=True)
+            app.DATA_DIR, app.TASKS_FILE, app.OPERATIONS_FILE, app.TASK_EXECUTOR = old_values
+            app.TASK_RUNNERS.pop(task_type, None)
+            app.TASK_FUTURES.clear()
+
+    def test_node_preflight_reports_capabilities_and_storage(self):
+        responses = [
+            {"environment": {"server_version": "6.12", "kernel_version": "6.1"},
+             "config": {"user.incus-cn-panel.kvm": "true"}},
+            {"cpu": {"total": 4, "architecture": "x86_64"},
+             "memory": {"total": 8 * app.GIB_BYTES}},
+            {"driver": "dir"},
+            {"space": {"total": 80 * app.GIB_BYTES, "used": 10 * app.GIB_BYTES}},
+            {"managed": True},
+        ]
+        with mock.patch("app.require_node", return_value="node-a"), \
+             mock.patch("app.run_incus", side_effect=[json.dumps(item) for item in responses]), \
+             mock.patch("app.save_node_health", side_effect=lambda report: report):
+            report = app.node_preflight("node-a")
+        self.assertEqual(report["status"], "healthy")
+        self.assertTrue(report["capabilities"]["containers"])
+        self.assertTrue(report["capabilities"]["virtual_machines"])
+        self.assertEqual(report["facts"]["storage_driver"], "dir")
+
+    def test_scheduler_plan_uses_standard_tiers_and_cpu_budget(self):
+        node = {
+            "name": "node-a", "status": "online", "cpu": 4,
+            "cpu_budget_percent": 340, "cpu_committed_percent": 0,
+            "cpu_available_percent": 340,
+            "available_memory": 8 * app.GIB_BYTES,
+            "available_disk": 60 * app.GIB_BYTES,
+            "available_ssh_ports": 100, "instances": [],
+        }
+        plan = app.scheduler_plan(
+            node, 3, "container", "images:debian/12", "balanced",
+        )
+        standard_memory = {value * app.MIB_BYTES for value in (
+            128, 256, 512, 768, 1024, 1536, 2048, 3072, 4096,
+        )}
+        self.assertIn(plan["memory_bytes"], standard_memory)
+        self.assertLessEqual(plan["cpu_allowance"] * 3, 340)
+        self.assertGreaterEqual(plan["maximum"], 3)
+        self.assertFalse(plan["constrained"])
+
+    def test_reconcile_repairs_orphaned_control_records(self):
+        old_values = (
+            app.DATA_DIR, app.CREDENTIALS_FILE, app.TRAFFIC_FILE,
+            app.USERS_FILE, app.RECONCILE_FILE,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.CREDENTIALS_FILE = os.path.join(directory, "credentials.json")
+                app.TRAFFIC_FILE = os.path.join(directory, "traffic.json")
+                app.USERS_FILE = os.path.join(directory, "users.json")
+                app.RECONCILE_FILE = os.path.join(directory, "reconcile.json")
+                app._write_private_json(app.CREDENTIALS_FILE, {"node-a/gone": {"host": "x"}})
+                app._write_private_json(app.TRAFFIC_FILE, {
+                    "version": 1, "instances": {"node-a/gone": {"used_bytes": 1}},
+                })
+                app._write_private_json(app.USERS_FILE, {
+                    "version": 1, "users": {"user-a": {
+                        "enabled": True, "assignments": {"node-a/gone": "2099-01-01T00:00:00Z"},
+                    }},
+                })
+                report = app.reconcile_state(
+                    [{"name": "node-a", "status": "online"}], [], repair=True,
+                )
+                self.assertEqual(report["issue_count"], 3)
+                self.assertEqual(report["repaired_count"], 3)
+                self.assertEqual(app._read_credentials_unlocked(), {})
+                self.assertEqual(app.read_traffic_data()["instances"], {})
+                self.assertEqual(app._read_users_unlocked()["user-a"]["assignments"], {})
+        finally:
+            (
+                app.DATA_DIR, app.CREDENTIALS_FILE, app.TRAFFIC_FILE,
+                app.USERS_FILE, app.RECONCILE_FILE,
+            ) = old_values
 
     def test_parse_instances_includes_resource_and_access_metadata(self):
         instances = app.parse_instances("node-hk-01", [{

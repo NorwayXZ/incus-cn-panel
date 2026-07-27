@@ -140,6 +140,11 @@ EOF
 fi
 
 incus config set core.https_address "[::]:8443"
+if [ -e /dev/kvm ]; then
+  incus config set user.incus-cn-panel.kvm true
+else
+  incus config set user.incus-cn-panel.kvm false
+fi
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
   if [[ -n $CONTROLLER_IP ]]; then
     ufw allow from "$CONTROLLER_IP" to any port 8443 proto tcp comment 'Incus controller'

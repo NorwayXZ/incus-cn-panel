@@ -43,6 +43,9 @@ TRAFFIC_FILE = os.path.join(DATA_DIR, "traffic-usage.json")
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
 UPDATE_STATUS_FILE = os.path.join(DATA_DIR, "update-status.json")
+TASKS_FILE = os.path.join(DATA_DIR, "tasks.json")
+NODE_HEALTH_FILE = os.path.join(DATA_DIR, "node-health.json")
+RECONCILE_FILE = os.path.join(DATA_DIR, "reconcile-status.json")
 UPDATER_PATH = os.environ.get("PANEL_UPDATER_PATH", "/usr/local/sbin/incus-cn-panel-update")
 UPDATE_VERSION_URL = os.environ.get(
     "PANEL_UPDATE_VERSION_URL",
@@ -59,10 +62,17 @@ USERS_LOCK = threading.Lock()
 NOTIFICATION_LOCK = threading.RLock()
 TRAFFIC_LOCK = threading.RLock()
 UPDATE_LOCK = threading.RLock()
+TASK_LOCK = threading.RLock()
+NODE_HEALTH_LOCK = threading.RLock()
+RECONCILE_LOCK = threading.RLock()
 PASSWORD_CONFIG_LOCK = threading.Lock()
 NODE_LIVE_LOCK = threading.Lock()
 MONITOR_SCAN_LOCK = threading.Lock()
 MONITOR_WAKE_EVENT = threading.Event()
+TASK_FUTURES = {}
+TASK_EXECUTOR = None
+TASK_RUNNERS = {}
+LAST_RECONCILE_AT = 0.0
 SESSION_TTL = 12 * 60 * 60
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,31}$")
@@ -81,6 +91,8 @@ MAX_USER_ASSIGNMENTS = 500
 MAX_JSON_BODY_BYTES = 128 * 1024
 MAX_NOTIFICATION_EVENTS = 500
 MAX_TRAFFIC_LIMIT_BYTES = 1024**5
+MAX_TASKS = 300
+RECONCILE_INTERVAL_SECONDS = 10 * 60
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 PANEL_TIMEZONE = ZoneInfo(os.environ.get("PANEL_TIMEZONE", "Asia/Shanghai"))
 MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", str(8 * 1024**3)))
@@ -811,6 +823,12 @@ def add_remote(name, address, token):
                 except Exception:
                     pass
                 raise node_connection_failure(stage, exc, token, address) from exc
+        try:
+            node_preflight(name)
+        except Exception:
+            # The trust relationship is valid at this point. A later health check can retry
+            # optional capability discovery without discarding the newly added remote.
+            pass
 
 
 def format_bytes(value):
@@ -1236,6 +1254,7 @@ def inspect_node(name, remote):
             "instances": instances,
             "images": images,
             "image_error": image_error,
+            "preflight": read_node_health(name),
             "error": "",
         }
     except Exception as exc:
@@ -1269,6 +1288,7 @@ def inspect_node(name, remote):
             "instances": [],
             "images": [],
             "image_error": "",
+            "preflight": read_node_health(name),
             "error": str(exc),
         }
 
@@ -1485,6 +1505,480 @@ def _write_private_json(path, data):
         except FileNotFoundError:
             pass
         raise
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+class TaskCancelled(RuntimeError):
+    pass
+
+
+class TaskContext:
+    def __init__(self, task_id):
+        self.task_id = task_id
+
+    def update(self, progress=None, stage=None, message=None, check_cancelled=True):
+        update_task(self.task_id, progress=progress, stage=stage, message=message)
+        if check_cancelled:
+            self.check_cancelled()
+
+    def check_cancelled(self):
+        task = get_task(self.task_id, private=True)
+        if task and task.get("cancel_requested"):
+            raise TaskCancelled("任务已由管理员取消")
+
+
+def default_tasks_data():
+    return {"version": 1, "tasks": []}
+
+
+def _read_tasks_unlocked():
+    data = _read_private_json(TASKS_FILE, default_tasks_data())
+    tasks = data.get("tasks", [])
+    return tasks if isinstance(tasks, list) else []
+
+
+def _write_tasks_unlocked(tasks):
+    _write_private_json(TASKS_FILE, {"version": 1, "tasks": tasks[-MAX_TASKS:]})
+
+
+def public_task(task):
+    return {key: value for key, value in task.items() if key not in {"payload"}}
+
+
+def list_tasks(session=None, limit=100):
+    with TASK_LOCK:
+        tasks = list(reversed(_read_tasks_unlocked()))
+    if session and session.get("role") != "admin":
+        tasks = [task for task in tasks if task.get("owner") == session.get("username")]
+    return [public_task(task) for task in tasks[:max(1, min(int(limit), 200))]]
+
+
+def get_task(task_id, private=False):
+    with TASK_LOCK:
+        task = next((item for item in _read_tasks_unlocked() if item.get("id") == task_id), None)
+    if not task:
+        return None
+    return dict(task) if private else public_task(task)
+
+
+def update_task(task_id, **changes):
+    with TASK_LOCK:
+        tasks = _read_tasks_unlocked()
+        task = next((item for item in tasks if item.get("id") == task_id), None)
+        if not task:
+            return None
+        for key, value in changes.items():
+            if value is not None:
+                task[key] = value
+        task["updated_at"] = utc_now()
+        _write_tasks_unlocked(tasks)
+        return dict(task)
+
+
+def _task_executor():
+    global TASK_EXECUTOR
+    with TASK_LOCK:
+        if TASK_EXECUTOR is None:
+            TASK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="panel-task")
+        return TASK_EXECUTOR
+
+
+def _execute_task(task_id):
+    task = get_task(task_id, private=True)
+    if not task:
+        return
+    runner = TASK_RUNNERS.get(task.get("type"))
+    if not runner:
+        update_task(
+            task_id, status="failed", stage="无法执行", progress=100,
+            message="当前版本不支持恢复此任务", finished_at=utc_now(),
+        )
+        return
+    update_task(
+        task_id, status="running", stage="正在启动", progress=max(1, int(task.get("progress", 0))),
+        started_at=utc_now(), message="任务已开始执行",
+    )
+    context = TaskContext(task_id)
+    try:
+        result = runner(context, dict(task.get("payload") or {})) or {}
+        update_task(
+            task_id, status="complete", stage="已完成", progress=100,
+            message=str(result.get("message", "任务执行完成"))[:500],
+            result={key: value for key, value in result.items() if key != "message"},
+            finished_at=utc_now(),
+        )
+        record_operation(
+            f"task_{task.get('type')}", task.get("target", task_id), task.get("node", ""),
+            message=f"任务 {task_id} 已完成",
+        )
+    except TaskCancelled as exc:
+        update_task(
+            task_id, status="cancelled", stage="已取消", progress=100,
+            message=str(exc), finished_at=utc_now(),
+        )
+    except Exception as exc:
+        detail = str(exc).replace("\n", " ")[-1000:]
+        update_task(
+            task_id, status="failed", stage="执行失败", progress=100,
+            message=detail, finished_at=utc_now(),
+        )
+        record_operation(
+            f"task_{task.get('type')}", task.get("target", task_id), task.get("node", ""),
+            "failed", detail,
+        )
+    finally:
+        with TASK_LOCK:
+            TASK_FUTURES.pop(task_id, None)
+
+
+def enqueue_task(task_type, label, node="", target="", payload=None, owner="admin"):
+    if task_type not in TASK_RUNNERS:
+        raise ValueError("不支持的后台任务类型")
+    task_id = secrets.token_hex(8)
+    now = utc_now()
+    task = {
+        "id": task_id,
+        "type": task_type,
+        "label": str(label)[:120],
+        "node": str(node)[:63],
+        "target": str(target)[:128],
+        "owner": str(owner)[:32],
+        "status": "queued",
+        "progress": 0,
+        "stage": "等待执行",
+        "message": "任务已进入后台队列",
+        "created_at": now,
+        "updated_at": now,
+        "started_at": "",
+        "finished_at": "",
+        "cancel_requested": False,
+        "payload": dict(payload or {}),
+        "result": {},
+    }
+    with TASK_LOCK:
+        tasks = _read_tasks_unlocked()
+        duplicate = next((
+            item for item in reversed(tasks)
+            if item.get("status") in {"queued", "running"}
+            and item.get("type") == task_type
+            and item.get("node") == task["node"]
+            and item.get("target") == task["target"]
+        ), None)
+        if duplicate:
+            return public_task(duplicate)
+        tasks.append(task)
+        _write_tasks_unlocked(tasks)
+        TASK_FUTURES[task_id] = _task_executor().submit(_execute_task, task_id)
+    return public_task(task)
+
+
+def cancel_task(task_id):
+    task = get_task(task_id, private=True)
+    if not task:
+        raise ValueError("任务不存在")
+    if task.get("status") not in {"queued", "running"}:
+        raise ValueError("该任务当前不能取消")
+    future = TASK_FUTURES.get(task_id)
+    if task.get("status") == "queued" and future and future.cancel():
+        return public_task(update_task(
+            task_id, status="cancelled", stage="已取消", progress=100,
+            message="任务在开始前已取消", cancel_requested=True, finished_at=utc_now(),
+        ))
+    return public_task(update_task(
+        task_id, cancel_requested=True, stage="正在取消",
+        message="当前步骤结束后将停止任务",
+    ))
+
+
+def retry_task(task_id, owner="admin"):
+    task = get_task(task_id, private=True)
+    if not task:
+        raise ValueError("任务不存在")
+    if task.get("status") not in {"failed", "cancelled", "interrupted"}:
+        raise ValueError("只有失败、取消或中断的任务可以重试")
+    return enqueue_task(
+        task["type"], task.get("label", "重试任务"), task.get("node", ""),
+        task.get("target", ""), task.get("payload") or {}, owner,
+    )
+
+
+def recover_interrupted_tasks():
+    with TASK_LOCK:
+        tasks = _read_tasks_unlocked()
+        changed = False
+        for task in tasks:
+            if task.get("status") in {"queued", "running"}:
+                task.update({
+                    "status": "interrupted",
+                    "stage": "服务曾重启",
+                    "progress": 100,
+                    "message": "面板服务重启导致任务中断，可以安全重试",
+                    "finished_at": utc_now(),
+                    "updated_at": utc_now(),
+                })
+                changed = True
+        if changed:
+            _write_tasks_unlocked(tasks)
+
+
+def default_node_health_data():
+    return {"version": 1, "nodes": {}}
+
+
+def read_node_health(node=""):
+    with NODE_HEALTH_LOCK:
+        data = _read_private_json(NODE_HEALTH_FILE, default_node_health_data())
+    nodes = data.get("nodes", {}) if isinstance(data.get("nodes"), dict) else {}
+    return dict(nodes.get(node, {})) if node else nodes
+
+
+def save_node_health(report):
+    with NODE_HEALTH_LOCK:
+        data = _read_private_json(NODE_HEALTH_FILE, default_node_health_data())
+        nodes = data.setdefault("nodes", {})
+        nodes[report["node"]] = report
+        _write_private_json(NODE_HEALTH_FILE, data)
+    return report
+
+
+def node_preflight(node):
+    node = require_node(node)
+    checked_at = utc_now()
+    checks = []
+
+    def add(code, title, status, detail, remediation=""):
+        checks.append({
+            "code": code, "title": title, "status": status,
+            "detail": detail, "remediation": remediation,
+        })
+
+    try:
+        server = json.loads(run_incus("query", f"{node}:/1.0", timeout=20))
+        resources = json.loads(run_incus("query", f"{node}:/1.0/resources", timeout=20))
+        pool = json.loads(run_incus("query", f"{node}:/1.0/storage-pools/default", timeout=20))
+        pool_resources = json.loads(
+            run_incus("query", f"{node}:/1.0/storage-pools/default/resources", timeout=20)
+        )
+        network = json.loads(run_incus("query", f"{node}:/1.0/networks/incusbr0", timeout=20))
+    except Exception as exc:
+        report = {
+            "node": node, "status": "failed", "score": 0, "checked_at": checked_at,
+            "summary": "宿主机基础接口检查失败",
+            "checks": [{
+                "code": "connectivity", "title": "Incus API 与基础资源",
+                "status": "failed", "detail": str(exc)[-500:],
+                "remediation": "检查 Incus 服务、8443 端口、TLS 信任和宿主机网络",
+            }],
+            "capabilities": {"containers": False, "virtual_machines": False},
+        }
+        return save_node_health(report)
+
+    environment = server.get("environment") or {}
+    config = server.get("config") or {}
+    cpu_total = int((resources.get("cpu") or {}).get("total", 0) or 0)
+    memory_total = int((resources.get("memory") or {}).get("total", 0) or 0)
+    space = pool_resources.get("space") or {}
+    disk_total = int(space.get("total", 0) or 0)
+    disk_used = int(space.get("used", 0) or 0)
+    disk_free = max(0, disk_total - disk_used)
+    version = str(environment.get("server_version", "未知"))
+    add("api", "Incus API", "passed", f"Incus {version} 响应正常")
+    add(
+        "cpu", "CPU 资源", "passed" if cpu_total >= 1 else "failed",
+        f"检测到 {cpu_total} 个逻辑核心",
+        "宿主机至少需要 1 个可用 CPU 核心" if cpu_total < 1 else "",
+    )
+    memory_status = "passed" if memory_total >= GIB_BYTES else "warning"
+    add(
+        "memory", "内存容量", memory_status, f"物理内存 {format_bytes(memory_total)}",
+        "低于 1 GiB 时仅建议运行少量 Alpine 容器" if memory_status == "warning" else "",
+    )
+    storage_driver = str(pool.get("driver", "未知"))
+    storage_status = "passed" if disk_free >= 2 * GIB_BYTES else "failed"
+    add(
+        "storage", "default 存储池", storage_status,
+        f"{storage_driver} · 可用 {format_bytes(disk_free)} / {format_bytes(disk_total)}",
+        "释放磁盘空间，确保至少保留 2 GiB" if storage_status == "failed" else "",
+    )
+    network_status = "passed" if network.get("managed", True) else "warning"
+    add(
+        "network", "incusbr0 实例网络", network_status,
+        "托管 NAT 网桥可用" if network_status == "passed" else "网桥存在但不由 Incus 管理",
+        "建议使用 bootstrap-node.sh 重新创建托管 NAT 网桥" if network_status == "warning" else "",
+    )
+    kvm_value = str(config.get("user.incus-cn-panel.kvm", "unknown")).lower()
+    vm_ready = kvm_value == "true"
+    add(
+        "kvm", "KVM 虚拟化", "passed" if vm_ready else "warning",
+        "宿主机已确认提供 /dev/kvm" if vm_ready else "尚未确认 /dev/kvm，可正常创建 LXC",
+        "升级节点脚本或在确认嵌套虚拟化后设置 Incus 服务器标记" if not vm_ready else "",
+    )
+    failed = sum(item["status"] == "failed" for item in checks)
+    warnings = sum(item["status"] == "warning" for item in checks)
+    status = "failed" if failed else "warning" if warnings else "healthy"
+    score = max(0, 100 - failed * 35 - warnings * 10)
+    report = {
+        "node": node, "status": status, "score": score, "checked_at": checked_at,
+        "summary": "存在阻断项" if failed else "可接入，存在建议项" if warnings else "全部检查通过",
+        "checks": checks,
+        "capabilities": {"containers": not failed, "virtual_machines": not failed and vm_ready},
+        "facts": {
+            "incus_version": version,
+            "kernel": str(environment.get("kernel_version", "")),
+            "architecture": str((resources.get("cpu") or {}).get("architecture", "")),
+            "cpu": cpu_total,
+            "memory": memory_total,
+            "disk_free": disk_free,
+            "storage_driver": storage_driver,
+        },
+    }
+    return save_node_health(report)
+
+
+def _resource_tier(value, minimum, tiers):
+    candidates = [tier for tier in tiers if minimum <= tier <= value]
+    return max(candidates) if candidates else 0
+
+
+def scheduler_plan(node_info, count, kind, image_id, strategy="balanced"):
+    try:
+        count = int(count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("计划实例数量无效") from exc
+    if not 1 <= count <= 10000:
+        raise ValueError("计划实例数量必须在 1 到 10000 之间")
+    if kind not in {"container", "virtual-machine"}:
+        raise ValueError("实例类型无效")
+    if strategy not in {"stable", "balanced", "density"}:
+        raise ValueError("资源策略无效")
+    image = PUBLIC_IMAGE_MAP.get(str(image_id))
+    family = image["family"] if image else image_family(str(image_id))
+    profile = resource_profile(family, kind)
+    minimum_memory = parse_size_bytes(profile["minimum_memory"])
+    minimum_disk = parse_size_bytes(profile["minimum_disk"])
+    recommended_memory = parse_size_bytes(profile["recommended_memory"])
+    recommended_disk = parse_size_bytes(profile["recommended_disk"])
+    memory_share = int(node_info.get("available_memory", 0)) // count
+    disk_share = int(node_info.get("available_disk", 0)) // count
+    cpu_share = int(node_info.get("cpu_available_percent", 0)) // count
+    memory_tiers = [128, 256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536]
+    memory_tiers = [value * MIB_BYTES for value in memory_tiers]
+    disk_tiers = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 80, 100, 128, 160, 200, 256, 320, 512, 1024]
+    disk_tiers = [value * GIB_BYTES for value in disk_tiers]
+    factors = {"density": 0.35, "balanced": 0.60, "stable": 0.80}
+    factor = factors[strategy]
+    memory_target = minimum_memory if strategy == "density" else max(recommended_memory, int(memory_share * factor))
+    disk_target = minimum_disk if strategy == "density" else max(recommended_disk, int(disk_share * factor))
+    memory = _resource_tier(min(memory_share, memory_target), minimum_memory, memory_tiers)
+    disk = _resource_tier(min(disk_share, disk_target), minimum_disk, disk_tiers)
+    constrained = memory < minimum_memory or disk < minimum_disk or cpu_share < (100 if kind == "virtual-machine" else 5)
+    cpu_factor = {"density": 0.50, "balanced": 0.70, "stable": 0.85}[strategy]
+    cpu_commitment = max(1, int(cpu_share * cpu_factor / 5) * 5)
+    host_cpu = max(1, int(node_info.get("cpu", 1) or 1))
+    if kind == "virtual-machine":
+        cpu = max(1, min(host_cpu, 8, cpu_commitment // 100))
+        cpu_allowance = 0
+    else:
+        cpu = max(1, min(host_cpu, 4, (cpu_commitment + 99) // 100))
+        cpu_allowance = min(cpu * 100, cpu_commitment)
+    proposed = {
+        "type": kind,
+        "cpu": str(cpu),
+        "cpu_allowance": str(cpu_allowance),
+        "memory": format_binary_size(memory or minimum_memory),
+        "disk": format_binary_size(disk or minimum_disk),
+        "port_count": "0",
+    }
+    maximum, limits = maximum_instances(node_info, proposed)
+    return {
+        "node": node_info["name"], "count": count, "kind": kind,
+        "image": str(image_id), "strategy": strategy,
+        "cpu": cpu, "cpu_allowance": cpu_allowance,
+        "memory": proposed["memory"], "memory_bytes": memory or minimum_memory,
+        "disk": proposed["disk"], "disk_bytes": disk or minimum_disk,
+        "swap_bytes": recommended_swap_bytes(
+            proposed["memory"], proposed["disk"], kind
+        ),
+        "maximum": maximum, "limits": limits, "constrained": constrained or maximum < count,
+        "profile": profile,
+        "remaining": {
+            "cpu_percent": max(0, int(node_info.get("cpu_available_percent", 0)) - (cpu_allowance if kind == "container" else cpu * 100) * count),
+            "memory": max(0, int(node_info.get("available_memory", 0)) - (memory or minimum_memory) * count),
+            "disk": max(0, int(node_info.get("available_disk", 0)) - (disk or minimum_disk) * count),
+        },
+    }
+
+
+def default_reconcile_status():
+    return {
+        "status": "idle", "checked_at": "", "summary": "尚未执行状态核对",
+        "issue_count": 0, "repaired_count": 0, "issues": [],
+    }
+
+
+def read_reconcile_status():
+    with RECONCILE_LOCK:
+        return _read_private_json(RECONCILE_FILE, default_reconcile_status())
+
+
+def reconcile_state(nodes=None, instances=None, repair=False):
+    if nodes is None or instances is None:
+        nodes, instances = overview()
+    actual = {f"{item['node']}/{item['name']}" for item in instances}
+    issues = []
+    with CREDENTIALS_LOCK:
+        credential_keys = set(_read_credentials_unlocked())
+    traffic_keys = set(read_traffic_data().get("instances", {}))
+    with USERS_LOCK:
+        users = _read_users_unlocked()
+        assignment_keys = {
+            key for record in users.values() for key in assignment_map(record)
+        }
+    stale_credentials = sorted(credential_keys - actual)
+    stale_traffic = sorted(traffic_keys - actual)
+    stale_assignments = sorted(assignment_keys - actual)
+    for key in stale_credentials:
+        issues.append({"kind": "credential_orphan", "target": key, "message": "实例已不存在，但 SSH 凭据仍在控制端"})
+    for key in stale_traffic:
+        issues.append({"kind": "traffic_orphan", "target": key, "message": "实例已不存在，但流量计数仍在控制端"})
+    for key in stale_assignments:
+        issues.append({"kind": "assignment_orphan", "target": key, "message": "实例已不存在，但用户授权仍然保留"})
+    managed = {
+        f"{item['node']}/{item['name']}" for item in instances
+        if item.get("ssh_port")
+    }
+    for key in sorted(managed - credential_keys):
+        issues.append({"kind": "credential_missing", "target": key, "message": "实例存在 SSH 端口配置，但控制端没有连接凭据"})
+    offline_nodes = [node["name"] for node in nodes if node.get("status") != "online"]
+    for node in offline_nodes:
+        issues.append({"kind": "node_unverified", "target": node, "message": "宿主机离线，本轮无法验证其实例状态"})
+    repaired = 0
+    if repair:
+        for key in stale_credentials:
+            node, name = key.split("/", 1)
+            delete_credentials(node, name)
+            repaired += 1
+        for key in stale_traffic:
+            node, name = key.split("/", 1)
+            remove_traffic_usage(node, name)
+            repaired += 1
+        for key in stale_assignments:
+            node, name = key.split("/", 1)
+            remove_instance_assignments(node, name)
+            repaired += 1
+    report = {
+        "status": "warning" if issues else "healthy",
+        "checked_at": utc_now(),
+        "summary": f"发现 {len(issues)} 项状态差异" if issues else "面板状态与 Incus 一致",
+        "issue_count": len(issues), "repaired_count": repaired,
+        "issues": issues[:200],
+    }
+    with RECONCILE_LOCK:
+        _write_private_json(RECONCILE_FILE, report)
+    return report
 
 
 def version_tuple(value):
@@ -2258,12 +2752,20 @@ def _persist_anomalies(config, anomalies, snapshot, scan_error=""):
 
 
 def run_monitor_scan(force=False, traffic_only=False):
+    global LAST_RECONCILE_AT
     with MONITOR_SCAN_LOCK:
         config = read_notification_config()
         data = read_notification_data()
         try:
             nodes, instances = overview()
             update_traffic_usage(instances)
+            now_monotonic = time.monotonic()
+            if force or now_monotonic - LAST_RECONCILE_AT >= RECONCILE_INTERVAL_SECONDS:
+                try:
+                    reconcile_state(nodes, instances, repair=False)
+                    LAST_RECONCILE_AT = now_monotonic
+                except Exception as reconcile_error:
+                    print(f"状态一致性核对失败: {reconcile_error}", flush=True)
             if traffic_only or (not config["enabled"] and not force):
                 return notification_payload()
             anomalies, snapshot = detect_anomalies(nodes, instances, config, data.get("snapshot"))
@@ -2324,6 +2826,8 @@ def overview_for_session(session):
             "operations": recent_operations(),
             "users": list_user_accounts(),
             "notifications": notification_payload(),
+            "tasks": list_tasks(session),
+            "reconcile": read_reconcile_status(),
         }
     record = get_user_account(session["username"]) or {}
     active = {
@@ -2353,6 +2857,8 @@ def overview_for_session(session):
         "operations": [],
         "users": [],
         "notifications": {},
+        "tasks": list_tasks(session),
+        "reconcile": {},
     }
 
 
@@ -2773,7 +3279,7 @@ def live_node_info(node):
     return info
 
 
-def create_batch_instances(data):
+def create_batch_instances(data, progress=None):
     node = require_node(str(data.get("node", "")))
     prefix = str(data.get("name_prefix", "")).lower()
     try:
@@ -2833,12 +3339,16 @@ def create_batch_instances(data):
         created = []
         try:
             for index, name in enumerate(names):
+                if progress:
+                    progress(index, count, name)
                 item_data = dict(batch_data)
                 item_data["name"] = name
                 if port_count:
                     item_data["port_start"], item_data["port_end"] = port_blocks[index]
                 _, _, access = create_instance(item_data)
                 created.append({"name": name, "access": access})
+                if progress:
+                    progress(index + 1, count, name)
         except Exception:
             for item in reversed(created):
                 try:
@@ -2849,6 +3359,69 @@ def create_batch_instances(data):
                     pass
             raise
     return node, created
+
+
+def task_create_instance(context, payload):
+    name = str(payload.get("name", ""))
+    context.update(5, "检查配置", "正在复核宿主机容量、名称和端口")
+    context.update(18, "创建实例", "正在下载镜像并创建 Incus 实例")
+    node, name, _access = create_instance(payload, validate_capacity=True)
+    context.update(92, "验证 SSH", "实例已启动，正在确认连接信息", check_cancelled=False)
+    return {
+        "message": f"实例 {name} 已创建并完成 SSH 配置",
+        "node": node, "name": name,
+    }
+
+
+def task_create_batch(context, payload):
+    try:
+        total = int(payload.get("count", 0))
+    except (TypeError, ValueError):
+        total = 0
+    context.update(3, "批量预检", "正在锁定名称、资源和端口计划")
+
+    def progress(done, count, name):
+        value = 8 + int(done / max(1, count) * 86)
+        context.update(value, f"创建 {done}/{count}", f"正在处理实例 {name}")
+
+    node, created = create_batch_instances(payload, progress=progress)
+    return {
+        "message": f"已成功创建 {len(created)} 台实例",
+        "node": node, "count": len(created),
+        "instances": [item["name"] for item in created],
+    }
+
+
+def task_node_preflight(context, payload):
+    node = str(payload.get("node", ""))
+    context.update(10, "连接宿主机", "正在读取 Incus API 和硬件资源")
+    report = node_preflight(node)
+    context.update(90, "生成体检报告", report["summary"])
+    return {
+        "message": f"{node} 体检完成：{report['summary']}",
+        "node": node, "preflight": report,
+    }
+
+
+def task_reconcile(context, payload):
+    repair = bool(payload.get("repair", False))
+    context.update(10, "读取实际状态", "正在读取全部宿主机与实例")
+    nodes, instances = overview()
+    context.update(65, "比对控制端数据", "正在核对凭据、流量和用户授权")
+    report = reconcile_state(nodes, instances, repair=repair)
+    context.update(95, "保存核对报告", report["summary"])
+    return {
+        "message": report["summary"], "reconcile": report,
+        "repaired_count": report["repaired_count"],
+    }
+
+
+TASK_RUNNERS.update({
+    "instance_create": task_create_instance,
+    "instance_batch_create": task_create_batch,
+    "node_preflight": task_node_preflight,
+    "state_reconcile": task_reconcile,
+})
 
 
 
@@ -3048,6 +3621,33 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json(500, {"error": str(exc)})
             return
+        if path == "/api/tasks":
+            auth = self.require_auth()
+            if not auth:
+                return
+            self.send_json(200, {"tasks": list_tasks(auth[1])})
+            return
+        if path == "/api/system/reconcile":
+            auth = self.require_admin()
+            if not auth:
+                return
+            self.send_json(200, {"reconcile": read_reconcile_status()})
+            return
+        preflight_match = re.fullmatch(r"/api/nodes/([^/]+)/preflight", path)
+        if preflight_match:
+            auth = self.require_admin()
+            if not auth:
+                return
+            try:
+                node = require_node(preflight_match.group(1))
+                report = read_node_health(node)
+                if not report:
+                    self.send_json(404, {"error": "该宿主机尚未执行接入体检"})
+                else:
+                    self.send_json(200, {"preflight": report})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
         if path == "/api/notifications":
             auth = self.require_admin()
             if not auth:
@@ -3186,6 +3786,70 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 record_operation("panel_update", APP_VERSION, status="failed", message=str(exc))
                 self.send_json(500, {"error": str(exc)})
+            return
+        if path == "/api/scheduler/plan":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                data = self.read_json()
+                node_info = live_node_info(str(data.get("node", "")))
+                plan = scheduler_plan(
+                    node_info, data.get("count", 1), str(data.get("type", "container")),
+                    str(data.get("image", "")), str(data.get("strategy", "balanced")),
+                )
+                self.send_json(200, {"plan": plan})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path == "/api/system/reconcile":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                data = self.read_json()
+                repair = bool(data.get("repair", False))
+                task = enqueue_task(
+                    "state_reconcile", "修复状态一致性" if repair else "核对状态一致性",
+                    target="控制端状态", payload={"repair": repair},
+                    owner=auth[1]["username"],
+                )
+                self.send_json(202, {"ok": True, "task": task})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        preflight_match = re.fullmatch(r"/api/nodes/([^/]+)/preflight", path)
+        if preflight_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                node = require_node(preflight_match.group(1))
+                task = enqueue_task(
+                    "node_preflight", f"体检宿主机 {node}", node=node, target=node,
+                    payload={"node": node}, owner=auth[1]["username"],
+                )
+                self.send_json(202, {"ok": True, "task": task})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        task_match = re.fullmatch(r"/api/tasks/([a-f0-9]{16})/(retry|cancel)", path)
+        if task_match:
+            task = get_task(task_match.group(1), private=True)
+            if not task:
+                self.send_json(404, {"error": "任务不存在"})
+                return
+            if auth[1].get("role") != "admin" and task.get("owner") != auth[1].get("username"):
+                self.send_json(403, {"error": "无权操作该任务"})
+                return
+            try:
+                if task_match.group(2) == "retry":
+                    updated = retry_task(task["id"], auth[1]["username"])
+                else:
+                    updated = cancel_task(task["id"])
+                self.send_json(202, {"ok": True, "task": updated})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
             return
         if path == "/api/notifications/config":
             if auth[1].get("role") != "admin":
@@ -3342,14 +4006,15 @@ class Handler(BaseHTTPRequestHandler):
                 data = self.read_json()
                 node = str(data.get("node", ""))
                 name = str(data.get("name", ""))
-                node, name, access = create_instance(data, validate_capacity=True)
-                record_operation("instance_create", name, node)
-                self.send_json(201, {"ok": True, "access": access})
-            except subprocess.TimeoutExpired:
-                record_operation("instance_create", name or "未知实例", node, "failed", "创建超时")
-                self.send_json(504, {"error": "镜像下载或实例创建超时"})
+                require_node(node)
+                if not NAME_RE.fullmatch(name):
+                    raise ValueError("实例名称格式无效")
+                task = enqueue_task(
+                    "instance_create", f"创建实例 {name}", node=node, target=name,
+                    payload=data, owner=auth[1]["username"],
+                )
+                self.send_json(202, {"ok": True, "task": task})
             except Exception as exc:
-                record_operation("instance_create", name or "未知实例", node, "failed", str(exc))
                 self.send_json(400, {"error": str(exc)})
             return
         if path == "/api/instances/batch":
@@ -3362,23 +4027,15 @@ class Handler(BaseHTTPRequestHandler):
                 data = self.read_json()
                 node = str(data.get("node", ""))
                 prefix = str(data.get("name_prefix", ""))
-                node, created = create_batch_instances(data)
-                record_operation(
-                    "instance_batch_create", prefix or "批量实例", node,
-                    message=f"成功创建 {len(created)} 台实例",
+                require_node(node)
+                if not prefix:
+                    raise ValueError("请填写批量名称前缀")
+                task = enqueue_task(
+                    "instance_batch_create", f"批量创建 {data.get('count', 0)} 台实例",
+                    node=node, target=prefix, payload=data, owner=auth[1]["username"],
                 )
-                self.send_json(201, {"ok": True, "count": len(created), "instances": created})
-            except subprocess.TimeoutExpired:
-                record_operation(
-                    "instance_batch_create", prefix or "批量实例", node,
-                    "failed", "批量创建超时",
-                )
-                self.send_json(504, {"error": "批量创建超时，已尝试清理本批实例"})
+                self.send_json(202, {"ok": True, "task": task})
             except Exception as exc:
-                record_operation(
-                    "instance_batch_create", prefix or "批量实例", node,
-                    "failed", str(exc),
-                )
                 self.send_json(400, {"error": str(exc)})
             return
 
@@ -3529,6 +4186,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     if not PASSWORD_SALT or not PASSWORD_HASH:
         raise SystemExit("缺少面板密码配置")
+    recover_interrupted_tasks()
     server = PanelServer((HOST, PORT), Handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
