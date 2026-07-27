@@ -203,8 +203,8 @@ ALERT_RULES = {
         "default_mode": "panel_telegram",
     },
     "node_offline": {
-        "label": "宿主机离线或 Incus API 无法连接",
-        "description": "连接超时、TLS/证书错误、Incus 服务停止或网络中断。",
+        "label": "宿主机离线或节点 API 无法连接",
+        "description": "连接超时、TLS/证书错误、虚拟化服务停止或网络中断。",
         "severity": "critical",
         "default_mode": "panel_telegram",
     },
@@ -228,13 +228,13 @@ ALERT_RULES = {
     },
     "node_image_error": {
         "label": "宿主机镜像查询失败",
-        "description": "Incus 在线，但本地镜像目录读取失败。",
+        "description": "节点在线，但本地镜像目录读取失败。",
         "severity": "warning",
         "default_mode": "panel",
     },
     "instance_memory_high": {
         "label": "实例内存使用率过高",
-        "description": "按实例当前用量与 Incus 内存上限的比例判断。",
+        "description": "按实例当前用量与节点内存上限的比例判断。",
         "severity": "warning",
         "default_mode": "panel",
     },
@@ -252,13 +252,13 @@ ALERT_RULES = {
     },
     "instance_no_ipv4": {
         "label": "运行中的实例没有 IPv4",
-        "description": "可能是网桥、DHCP、系统网络或 Incus Agent 异常。",
+        "description": "可能是网桥、DHCP、系统网络或虚拟机代理异常。",
         "severity": "warning",
         "default_mode": "off",
     },
     "instance_missing": {
         "label": "实例从在线宿主机消失",
-        "description": "检测到实例被外部删除或未被 Incus 返回；首次巡检不会触发。",
+        "description": "检测到实例被外部删除或未被节点返回；首次巡检不会触发。",
         "severity": "critical",
         "default_mode": "off",
     },
@@ -282,7 +282,7 @@ def run_incus(*args, timeout=120):
         env={**os.environ, "LC_ALL": "C.UTF-8", "XDG_CACHE_HOME": cache_dir},
     )
     if result.returncode != 0:
-        message = (result.stderr or result.stdout or "Incus 命令执行失败").strip()
+        message = (result.stderr or result.stdout or "节点命令执行失败").strip()
         raise RuntimeError(message[-1000:])
     return result.stdout
 
@@ -349,8 +349,8 @@ def change_admin_password(current_password, new_password):
 
     current_password = str(current_password)
     new_password = str(new_password)
-    if not 10 <= len(new_password) <= 128:
-        raise ValueError("新密码长度必须在 10 到 128 个字符之间")
+    if not 6 <= len(new_password) <= 128:
+        raise ValueError("新密码长度必须在 6 到 128 个字符之间")
 
     with PASSWORD_CONFIG_LOCK:
         if not password_matches(current_password):
@@ -375,6 +375,63 @@ def change_admin_password(current_password, new_password):
         for token, session in list(SESSIONS.items()):
             if session.get("role") == "admin":
                 SESSIONS.pop(token, None)
+
+
+def change_admin_username(current_password, new_username):
+    global PANEL_USER
+
+    current_password = str(current_password)
+    new_username = str(new_username).strip()
+    if not USERNAME_RE.fullmatch(new_username):
+        raise ValueError("用户名需为 3-32 位字母、数字、点、下划线或连字符")
+
+    with PASSWORD_CONFIG_LOCK:
+        if not password_matches(current_password):
+            raise ValueError("当前密码错误")
+
+        old_username = PANEL_USER
+        if hmac.compare_digest(new_username.lower(), old_username.lower()):
+            raise ValueError("新用户名不能与当前用户名相同")
+
+        with USERS_LOCK:
+            users = _read_users_unlocked()
+            if new_username.lower() in users:
+                raise ValueError("该用户名与普通账户冲突")
+
+        old_security = None
+        security_changed = False
+        with SECURITY_LOCK:
+            security = _read_private_json(SECURITY_FILE, default_security_data())
+            accounts = security.setdefault("accounts", {})
+            if not isinstance(accounts, dict):
+                accounts = {}
+                security["accounts"] = accounts
+            old_key = old_username.lower()
+            new_key = new_username.lower()
+            if new_key in accounts and new_key != old_key:
+                raise ValueError("新用户名已有安全配置记录，请更换用户名")
+            if old_key in accounts:
+                old_security = security
+                security = json.loads(json.dumps(security))
+                accounts = security["accounts"]
+                accounts[new_key] = accounts.pop(old_key)
+                _write_private_json(SECURITY_FILE, security)
+                security_changed = True
+
+        try:
+            _write_password_config(PANEL_CONFIG_FILE, {"PANEL_USER": new_username})
+        except Exception:
+            if security_changed:
+                with SECURITY_LOCK:
+                    _write_private_json(SECURITY_FILE, old_security)
+            raise
+
+        PANEL_USER = new_username
+        for token, session in list(SESSIONS.items()):
+            if session.get("role") == "admin":
+                SESSIONS.pop(token, None)
+
+    return {"old_username": old_username, "new_username": new_username}
 
 
 def _read_users_unlocked():
@@ -408,8 +465,8 @@ def _write_users_unlocked(users):
 
 
 def _password_record(password):
-    if not 10 <= len(password) <= 128:
-        raise ValueError("密码长度必须在 10 到 128 个字符之间")
+    if not 6 <= len(password) <= 128:
+        raise ValueError("密码长度必须在 6 到 128 个字符之间")
     salt = secrets.token_hex(16)
     password_hash = hashlib.pbkdf2_hmac(
         "sha256", password.encode(), bytes.fromhex(salt), USER_PASSWORD_ITERATIONS
@@ -868,23 +925,23 @@ class NodeConnectionError(RuntimeError):
 
 
 def node_connection_failure(stage, exc, token="", address=""):
-    detail = str(exc).strip() or "Incus 未返回具体错误"
+    detail = str(exc).strip() or "节点服务未返回具体错误"
     if token:
         detail = detail.replace(token, "***")
     detail = detail[-1000:]
     lowered = detail.lower()
     common_hints = [
         f"确认控制面板服务器能够访问 {address}",
-        "确认宿主机防火墙和云安全组已放行 Incus TCP 端口",
+        "确认宿主机防火墙和云安全组已放行节点 API TCP 端口",
     ]
     if isinstance(exc, subprocess.TimeoutExpired) or "timed out" in lowered or "timeout" in lowered:
         return NodeConnectionError(
             stage, "连接宿主机超时", detail,
-            common_hints + ["确认 Incus 服务正在运行并监听外网地址"], 504,
+            common_hints + ["确认虚拟化服务正在运行并监听外网地址"], 504,
         )
     if any(value in lowered for value in ("connection refused", "actively refused")):
         return NodeConnectionError(
-            stage, "Incus 端口拒绝连接", detail,
+            stage, "节点 API 端口拒绝连接", detail,
             common_hints + ["在宿主机执行 systemctl status incus 检查服务状态"],
         )
     if any(value in lowered for value in ("no route to host", "network is unreachable")):
@@ -914,10 +971,10 @@ def node_connection_failure(stage, exc, token="", address=""):
             ["Trust Token 通常只能使用一次，请在宿主机重新生成", "生成后尽快粘贴完整 Token 再试"],
         )
     summaries = {
-        "控制端检查": "控制面板的 Incus 客户端不可用",
+        "控制端检查": "控制面板的节点客户端不可用",
         "连接与信任": "无法连接宿主机或建立 TLS 信任",
-        "API 验证": "已建立信任，但 Incus API 验证失败",
-        "资源检查": "Incus 无法读取宿主机资源信息",
+        "API 验证": "已建立信任，但节点 API 验证失败",
+        "资源检查": "节点服务无法读取宿主机资源信息",
         "存储检查": "宿主机缺少可用的 default 存储池",
         "网络检查": "宿主机缺少可用的 incusbr0 实例网络",
     }
@@ -927,7 +984,7 @@ def node_connection_failure(stage, exc, token="", address=""):
     elif stage == "网络检查":
         hints = ["在宿主机执行 incus network list", "确认存在名为 incusbr0 的托管 NAT 网桥"]
     elif stage == "控制端检查":
-        hints = ["检查控制面板服务日志", "确认 /usr/bin/incus 和面板 Incus 客户端配置可用"]
+        hints = ["检查控制面板服务日志", "确认 /usr/bin/incus 和面板节点客户端配置可用"]
     return NodeConnectionError(stage, summaries.get(stage, "宿主机验证失败"), detail, hints)
 
 
@@ -1838,7 +1895,7 @@ def begin_totp_setup(username):
         account = data.setdefault("accounts", {}).setdefault(username, {})
         account["pending_totp_secret"] = secret
         _write_private_json(SECURITY_FILE, data)
-    issuer = "Incus Control"
+    issuer = "WhySoQuiet"
     uri = f"otpauth://totp/{issuer}:{username}?secret={secret}&issuer={issuer}&digits=6&period=30"
     return {"secret": secret, "otpauth_uri": uri}
 
@@ -2347,15 +2404,15 @@ def node_preflight(node, probe=False):
             "node": node, "status": "failed", "score": 0, "checked_at": checked_at,
             "summary": "宿主机基础接口检查失败",
             "checks": [{
-                "code": "connectivity", "title": "Incus API 与基础资源",
+                "code": "connectivity", "title": "节点 API 与基础资源",
                 "status": "failed", "detail": str(exc)[-500:],
-                "remediation": "检查 Incus 服务、8443 端口、TLS 信任和宿主机网络",
+                "remediation": "检查虚拟化服务、8443 端口、TLS 信任和宿主机网络",
             }],
             "capabilities": {"containers": False, "virtual_machines": False},
             "admission": {
                 "eligible": False, "probe_verified": False,
                 "summary": "不符合切割小机标准：无法读取宿主机基础资源",
-                "reasons": ["Incus API 或基础资源不可用"],
+                "reasons": ["节点 API 或基础资源不可用"],
                 "minimum": {
                     "cpu": "1 个逻辑核心", "memory": "512 MiB 物理内存",
                     "disk_free": "3 GiB default 可用空间",
@@ -2384,7 +2441,7 @@ def node_preflight(node, probe=False):
     )
     host_memory_used = max(0, memory_used - instance_memory_used)
     version = str(environment.get("server_version", "未知"))
-    add("api", "Incus API", "passed", f"Incus {version} 响应正常")
+    add("api", "节点 API", "passed", f"虚拟化引擎 {version} 响应正常")
     add(
         "cpu", "CPU 资源", "passed" if cpu_total >= 1 else "failed",
         f"检测到 {cpu_total} 个逻辑核心",
@@ -2405,7 +2462,7 @@ def node_preflight(node, probe=False):
     network_status = "passed" if network.get("managed", False) else "failed"
     add(
         "network", "incusbr0 实例网络", network_status,
-        "托管 NAT 网桥可用" if network_status == "passed" else "网桥存在但不由 Incus 管理",
+        "托管 NAT 网桥可用" if network_status == "passed" else "网桥存在但不由节点服务管理",
         "使用 bootstrap-node.sh 重新创建托管 NAT 网桥" if network_status == "failed" else "",
     )
     reserve_policy = effective_node_reserves(node, memory_total, disk_total, cpu_total)
@@ -2702,7 +2759,7 @@ def reconcile_state(nodes=None, instances=None, repair=False):
     report = {
         "status": "warning" if issues else "healthy",
         "checked_at": utc_now(),
-        "summary": f"发现 {len(issues)} 项状态差异" if issues else "面板状态与 Incus 一致",
+        "summary": f"发现 {len(issues)} 项状态差异" if issues else "面板状态与节点一致",
         "issue_count": len(issues), "repaired_count": repaired,
         "issues": issues[:200],
     }
@@ -2743,7 +2800,7 @@ def read_update_status():
 def fetch_latest_version():
     request = Request(
         UPDATE_VERSION_URL,
-        headers={"Accept": "text/plain", "User-Agent": f"IncusCNPanel/{APP_VERSION}"},
+        headers={"Accept": "text/plain", "User-Agent": f"WhySoQuiet/{APP_VERSION}"},
     )
     try:
         with urlopen(request, timeout=10) as response:
@@ -3304,7 +3361,7 @@ def detect_anomalies(nodes, instances, config, previous_snapshot=None):
             if rule_enabled(config, "node_offline"):
                 anomalies[f"node_offline:{name}"] = _anomaly(
                     f"node_offline:{name}", "node_offline", name, name,
-                    f"宿主机 {name} 离线", node.get("error") or "无法连接 Incus API",
+                    f"宿主机 {name} 离线", node.get("error") or "无法连接节点 API",
                 )
             continue
         memory_percent = node["memory_used"] / node["memory"] * 100 if node["memory"] else 0
@@ -3426,7 +3483,7 @@ def telegram_text(event):
     if event["kind"] == "recovery":
         prefix = "[恢复]"
     lines = [
-        f"{prefix} Incus Control",
+        f"{prefix} WhySoQuiet",
         event["title"],
         event["message"],
     ]
@@ -3590,7 +3647,7 @@ def run_monitor_scan(force=False, traffic_only=False):
 def test_telegram_notification():
     config = read_notification_config()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    send_telegram_message(config, f"[测试] Incus Control\nTelegram 异常通知连接正常。\n时间: {now}")
+    send_telegram_message(config, f"[测试] WhySoQuiet\nTelegram 异常通知连接正常。\n时间: {now}")
     return True
 
 
@@ -4572,7 +4629,7 @@ def read_domain_routes():
 
 
 def write_caddy_routes(data):
-    lines = ["# Generated by Incus Control. Do not edit manually.", ""]
+    lines = ["# Generated by WhySoQuiet. Do not edit manually.", ""]
     for route in sorted(data.get("routes", []), key=lambda item: item["domain"]):
         lines.extend([
             route["domain"] + " {",
@@ -4666,7 +4723,7 @@ def task_create_instance(context, payload):
     ensure_node_admitted(
         str(payload.get("node", "")), str(payload.get("type", "container"))
     )
-    context.update(18, "创建实例", "正在下载镜像并创建 Incus 实例")
+    context.update(18, "创建实例", "正在下载镜像并创建虚拟化实例")
     node, name, _access = create_instance(payload, validate_capacity=True)
     context.update(92, "验证 SSH", "实例已启动，正在确认连接信息", check_cancelled=False)
     return {
@@ -4699,7 +4756,7 @@ def task_create_batch(context, payload):
 
 def task_node_preflight(context, payload):
     node = str(payload.get("node", ""))
-    context.update(10, "连接宿主机", "正在读取 Incus API 和硬件资源")
+    context.update(10, "连接宿主机", "正在读取节点 API 和硬件资源")
     report = node_preflight(node, probe=True)
     context.update(90, "生成体检报告", report["summary"])
     return {
@@ -4735,7 +4792,7 @@ def task_instance_action(context, payload):
     args = [action, ref]
     if action in {"stop", "restart"}:
         args.append("--force")
-    context.update(45, "执行生命周期操作", f"Incus 正在{action}实例")
+    context.update(45, "执行生命周期操作", f"节点服务正在{action}实例")
     run_incus(*args, timeout=300)
     return {"message": f"实例 {name} 操作完成", "node": node, "name": name, "action": action}
 
@@ -4764,9 +4821,9 @@ def task_instance_delete(context, payload):
     try:
         remaining = json.loads(run_incus("list", f"{node}:", "--format=json", timeout=30))
         if any(item.get("name") == name for item in remaining):
-            verification_error = "Incus 实例列表中仍存在同名实例"
+            verification_error = "节点实例列表中仍存在同名实例"
     except Exception as exc:
-        verification_error = f"无法读取删除后的 Incus 实例列表：{str(exc)[-500:]}"
+        verification_error = f"无法读取删除后的节点实例列表：{str(exc)[-500:]}"
     context.update(82, "清理控制记录", "正在清理 SSH 凭据、用户授权、流量和域名规则")
     cleanup = {
         "incus_instance_absent": not verification_error,
@@ -4877,7 +4934,7 @@ class PanelServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = f"IncusCNPanel/{APP_VERSION}"
+    server_version = f"WhySoQuiet/{APP_VERSION}"
 
     def setup(self):
         super().setup()
@@ -5308,6 +5365,34 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {
                     "ok": True,
                     "message": "密码修改成功，请使用新密码重新登录",
+                }, {
+                    "Set-Cookie": "incus_cn_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict",
+                })
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
+            return
+        if path == "/api/account/username":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                data = self.read_json()
+                changed = change_admin_username(
+                    data.get("current_password", ""), data.get("new_username", ""),
+                )
+                record_operation(
+                    "admin_username_change", changed["new_username"],
+                    message=(
+                        f"管理员用户名从 {changed['old_username']} "
+                        f"修改为 {changed['new_username']}"
+                    ),
+                )
+                self.send_json(200, {
+                    "ok": True,
+                    "username": changed["new_username"],
+                    "message": "用户名修改成功，请使用新用户名重新登录",
                 }, {
                     "Set-Cookie": "incus_cn_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict",
                 })
@@ -5972,7 +6057,7 @@ def main():
     )
     threading.Thread(target=monitor_loop, name="notification-monitor", daemon=True).start()
     threading.Thread(target=backup_scheduler_loop, name="backup-scheduler", daemon=True).start()
-    print(f"Incus 中文集群面板正在监听 https://{HOST}:{PORT}", flush=True)
+    print(f"WhySoQuiet 虚拟化集群面板正在监听 https://{HOST}:{PORT}", flush=True)
     server.serve_forever()
 
 

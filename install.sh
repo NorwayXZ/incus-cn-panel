@@ -11,7 +11,7 @@ PANEL_PORT=${PANEL_PORT:-8443}
 PANEL_USER=${PANEL_USER:-admin}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-log() { printf '\033[1;32m[Incus CN]\033[0m %s\n' "$*"; }
+log() { printf '\033[1;32m[WhySoQuiet]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[警告]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m[错误]\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -104,7 +104,7 @@ else
   if [[ -z ${PANEL_PASSWORD:-} ]]; then
     PANEL_PASSWORD=$(openssl rand -hex 12)
   fi
-  [[ ${#PANEL_PASSWORD} -ge 10 ]] || die "PANEL_PASSWORD 至少需要 10 个字符。"
+  [[ ${#PANEL_PASSWORD} -ge 6 ]] || die "PANEL_PASSWORD 至少需要 6 个字符。"
   salt=$(openssl rand -hex 16)
   password_iterations=260000
   password_hash=$(PANEL_PASSWORD_VALUE="$PANEL_PASSWORD" PANEL_SALT_VALUE="$salt" PANEL_ITERATIONS_VALUE="$password_iterations" python3 - <<'PY'
@@ -183,7 +183,7 @@ systemctl is-active --quiet incus-cn-panel.service || {
 }
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
-  ufw allow "${PANEL_PORT}/tcp" comment 'Incus CN Panel'
+  ufw allow "${PANEL_PORT}/tcp" comment 'WhySoQuiet Panel'
 fi
 
 log "安装完成"

@@ -36,13 +36,13 @@ class ValidationTests(unittest.TestCase):
             self.assertIn(marker, page)
 
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "2.5.0")
+        self.assertEqual(app.APP_VERSION, "2.6.0")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"2.5.1\n"
+        response.read.return_value = b"2.6.1\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "2.5.1")
+            self.assertEqual(app.fetch_latest_version(), "2.6.1")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -51,10 +51,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "2.5.1",
+            "status": "running", "target_version": "2.6.1",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "2.5.1")
+        self.assertEqual(payload["latest_version"], "2.6.1")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -70,7 +70,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("2.5.1")
+                    status = app.start_panel_update("2.6.1")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -78,7 +78,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "2.5.1")
+                self.assertEqual(saved["target_version"], "2.6.1")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -129,7 +129,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "2.5.0")
+                self.assertEqual(data["panel_version"], "2.6.0")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -440,12 +440,12 @@ class ValidationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(ValueError, "当前密码错误"):
                     app.change_admin_password("wrong-password", "new-strong-password")
-                with self.assertRaisesRegex(ValueError, "10 到 128"):
+                with self.assertRaisesRegex(ValueError, "6 到 128"):
                     app.change_admin_password("current-password", "short")
                 with open(config_file, encoding="utf-8") as handle:
                     self.assertEqual(handle.read(), original)
 
-                app.change_admin_password("current-password", "new-strong-password")
+                app.change_admin_password("current-password", "123456")
 
                 with open(config_file, encoding="utf-8") as handle:
                     updated = handle.read()
@@ -457,7 +457,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(updated.count("PANEL_PASSWORD_HASH="), 1)
                 self.assertIn("PANEL_PASSWORD_ITERATIONS=260000\n", updated)
                 self.assertEqual(os.stat(config_file).st_mode & 0o777, 0o600)
-                self.assertTrue(app.password_matches("new-strong-password"))
+                self.assertTrue(app.password_matches("123456"))
                 self.assertFalse(app.password_matches("current-password"))
                 self.assertNotIn("admin-one", app.SESSIONS)
                 self.assertNotIn("admin-two", app.SESSIONS)
@@ -467,6 +467,70 @@ class ValidationTests(unittest.TestCase):
             (
                 app.PASSWORD_SALT, app.PASSWORD_HASH, app.PASSWORD_ITERATIONS,
                 app.PANEL_CONFIG_FILE,
+            ) = old_values
+
+    def test_admin_username_change_persists_migrates_security_and_invalidates_sessions(self):
+        old_values = (
+            app.PANEL_USER, app.PASSWORD_SALT, app.PASSWORD_HASH,
+            app.PASSWORD_ITERATIONS, app.PANEL_CONFIG_FILE, app.DATA_DIR,
+            app.USERS_FILE, app.SECURITY_FILE,
+        )
+        app.SESSIONS.clear()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.PANEL_CONFIG_FILE = os.path.join(directory, "password.env")
+                app.USERS_FILE = os.path.join(directory, "users.json")
+                app.SECURITY_FILE = os.path.join(directory, "security.json")
+                with open(app.PANEL_CONFIG_FILE, "w", encoding="utf-8") as handle:
+                    handle.write("PANEL_USER=admin\nPANEL_PASSWORD_HASH=unchanged\n")
+                with open(app.USERS_FILE, "w", encoding="utf-8") as handle:
+                    json.dump({"version": 1, "users": {"customer": {}}}, handle)
+                security = {
+                    "version": 1,
+                    "accounts": {"admin": {"totp_enabled": True, "totp_secret": "ABC"}},
+                    "api_tokens": [],
+                }
+                with open(app.SECURITY_FILE, "w", encoding="utf-8") as handle:
+                    json.dump(security, handle)
+                app.PANEL_USER = "admin"
+                app.PASSWORD_SALT = "test-salt"
+                app.PASSWORD_HASH = hashlib.sha256(
+                    b"test-saltcurrent-password"
+                ).hexdigest()
+                app.PASSWORD_ITERATIONS = 0
+                app.SESSIONS.update({
+                    "admin-token": {"username": "admin", "role": "admin"},
+                    "user-token": {"username": "customer", "role": "user"},
+                })
+
+                with self.assertRaisesRegex(ValueError, "当前密码错误"):
+                    app.change_admin_username("wrong-password", "new-admin")
+                with self.assertRaisesRegex(ValueError, "普通账户冲突"):
+                    app.change_admin_username("current-password", "customer")
+
+                changed = app.change_admin_username("current-password", "new-admin")
+
+                self.assertEqual(changed, {
+                    "old_username": "admin", "new_username": "new-admin",
+                })
+                self.assertEqual(app.PANEL_USER, "new-admin")
+                with open(app.PANEL_CONFIG_FILE, encoding="utf-8") as handle:
+                    config = handle.read()
+                self.assertIn("PANEL_USER=new-admin\n", config)
+                self.assertIn("PANEL_PASSWORD_HASH=unchanged\n", config)
+                with open(app.SECURITY_FILE, encoding="utf-8") as handle:
+                    accounts = json.load(handle)["accounts"]
+                self.assertNotIn("admin", accounts)
+                self.assertEqual(accounts["new-admin"]["totp_secret"], "ABC")
+                self.assertNotIn("admin-token", app.SESSIONS)
+                self.assertIn("user-token", app.SESSIONS)
+        finally:
+            app.SESSIONS.clear()
+            (
+                app.PANEL_USER, app.PASSWORD_SALT, app.PASSWORD_HASH,
+                app.PASSWORD_ITERATIONS, app.PANEL_CONFIG_FILE, app.DATA_DIR,
+                app.USERS_FILE, app.SECURITY_FILE,
             ) = old_values
 
     def test_admin_password_http_route_requires_admin_and_logs_out(self):
@@ -542,11 +606,13 @@ class ValidationTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 app.DATA_DIR = directory
                 app.USERS_FILE = os.path.join(directory, "users.json")
-                user = app.create_user_account("customer-01", "strong-password")
+                with self.assertRaisesRegex(ValueError, "6 到 128"):
+                    app.create_user_account("too-short", "short")
+                user = app.create_user_account("customer-01", "123456")
                 self.assertEqual(user["username"], "customer-01")
                 self.assertEqual(os.stat(app.USERS_FILE).st_mode & 0o777, 0o600)
                 self.assertEqual(
-                    app.authenticate_account("customer-01", "strong-password"),
+                    app.authenticate_account("customer-01", "123456"),
                     {"username": "customer-01", "role": "user"},
                 )
                 self.assertIsNone(app.authenticate_account("customer-01", "wrong-password"))
@@ -556,7 +622,7 @@ class ValidationTests(unittest.TestCase):
                 }
                 app.update_user_account("customer-01", enabled=False)
                 self.assertNotIn("customer-session", app.SESSIONS)
-                self.assertIsNone(app.authenticate_account("customer-01", "strong-password"))
+                self.assertIsNone(app.authenticate_account("customer-01", "123456"))
         finally:
             app.SESSIONS.clear()
             app.DATA_DIR, app.USERS_FILE = old_values
@@ -1073,7 +1139,8 @@ class ValidationTests(unittest.TestCase):
             app.DATA_DIR, app.USERS_FILE = old_values
 
     def test_chinese_ui_and_relative_api_base(self):
-        self.assertIn("Incus Control", app.HTML)
+        self.assertIn("WhySoQuiet", app.HTML)
+        self.assertNotIn("Incus Control", app.HTML)
         self.assertIn('id="toggleLoginPassword"', app.HTML)
         self.assertIn('id="loginSubmit"', app.HTML)
         self.assertIn('id="sessionGate"', app.HTML)
@@ -1146,6 +1213,10 @@ class ValidationTests(unittest.TestCase):
         self.assertIn('id="openAdminAccount"', app.HTML)
         self.assertIn('id="adminAccountDialog"', app.HTML)
         self.assertIn("/api/account/password", app.HTML)
+        self.assertIn('id="adminUsernameForm"', app.HTML)
+        self.assertIn("/api/account/username", app.HTML)
+        self.assertIn('minlength="6"', app.HTML)
+        self.assertNotIn('minlength="10"', app.HTML)
         self.assertIn("/api/nodes/live", app.HTML)
         for label in ("运行健康", "CPU 安全预算", "宿主机保留", "实例已承诺", "安全池剩余", "实例网络"):
             self.assertIn(label, app.HTML)

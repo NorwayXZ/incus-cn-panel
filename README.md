@@ -1,6 +1,6 @@
-# Incus 中文集群面板
+# WhySoQuiet
 
-这是一个轻量的 Incus 多节点控制面板。中央服务器只运行中文 Web UI 和 Incus 客户端，其他 VPS 作为计算节点运行 Incus。管理员可以从一个面板接入节点，并在指定节点上创建、启动、停止、重启和删除系统容器或虚拟机。
+WhySoQuiet 是一个基于 Incus 的轻量多节点虚拟化控制面板。中央服务器只运行中文 Web UI 和节点客户端，其他 VPS 作为计算节点运行 Incus。管理员可以从一个面板接入节点，并在指定节点上创建、启动、停止、重启和删除系统容器或虚拟机。
 
 > 这不是把任意云厂商 VPS 再切成拥有独立公网 IP 的商业 VPS。默认创建的是共享宿主机内核、通过 NAT 出网的系统容器。虚拟机需要计算节点提供 `/dev/kvm`，并且需要更多内存和磁盘。
 
@@ -97,12 +97,12 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootstrap.sh \
-  | sudo env PANEL_USER=admin PANEL_PASSWORD='请设置至少10位的强密码' PANEL_PORT=8443 bash
+  | sudo env PANEL_USER=admin PANEL_PASSWORD='请设置至少6位的强密码' PANEL_PORT=8443 bash
 ```
 
 安装完成后会显示访问地址和随机密码，凭据保存在 `/root/incus-cn-panel-credentials.txt`。面板默认使用自签名 HTTPS 证书；已有 Caddy 域名时可参考 [Caddy 反向代理](docs/caddy.md)。
 
-登录后可点击页面右上角“账户安全”修改密码或启用动态验证码。系统会校验当前密码，并以 PBKDF2-SHA256 重新生成盐和哈希；成功后需要使用新密码重新登录。`/root/incus-cn-panel-credentials.txt` 只记录安装时的初始密码，之后不会保存新密码明文。
+登录后可点击页面右上角“账户安全”修改管理员用户名、密码或启用动态验证码。密码最少 6 位；系统会校验当前密码，并以 PBKDF2-SHA256 重新生成盐和哈希。用户名或密码修改成功后需要重新登录。`/root/incus-cn-panel-credentials.txt` 只记录安装时的初始凭据，之后不会保存修改内容或新密码明文。
 
 ## 安装计算节点
 
