@@ -36,13 +36,13 @@ class ValidationTests(unittest.TestCase):
             self.assertIn(marker, page)
 
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "2.3.0")
+        self.assertEqual(app.APP_VERSION, "2.4.0")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"2.3.1\n"
+        response.read.return_value = b"2.4.1\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "2.3.1")
+            self.assertEqual(app.fetch_latest_version(), "2.4.1")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -51,10 +51,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "2.3.1",
+            "status": "running", "target_version": "2.4.1",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "2.3.1")
+        self.assertEqual(payload["latest_version"], "2.4.1")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -70,7 +70,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("2.3.1")
+                    status = app.start_panel_update("2.4.1")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -78,7 +78,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "2.3.1")
+                self.assertEqual(saved["target_version"], "2.4.1")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -129,7 +129,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "2.3.0")
+                self.assertEqual(data["panel_version"], "2.4.0")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -760,6 +760,20 @@ class ValidationTests(unittest.TestCase):
             app.validate_traffic_quota(1024**2, "stop")
         with self.assertRaisesRegex(ValueError, "处理方式"):
             app.validate_traffic_quota(1024**3, "delete")
+        self.assertEqual(app.validate_traffic_reset_day(15), 15)
+        with self.assertRaisesRegex(ValueError, "1 日到 28 日"):
+            app.validate_traffic_reset_day(29)
+
+    def test_traffic_period_supports_per_instance_reset_day(self):
+        before = datetime(2026, 4, 10, 12, tzinfo=app.PANEL_TIMEZONE)
+        after = datetime(2026, 4, 20, 12, tzinfo=app.PANEL_TIMEZONE)
+        self.assertEqual(app.traffic_period(before, 1), "2026-04")
+        self.assertEqual(app.traffic_period(before, 15), "2026-03@15")
+        self.assertEqual(app.traffic_period(after, 15), "2026-04@15")
+        self.assertEqual(
+            app.traffic_next_reset_at(before, 15),
+            "2026-04-15T00:00:00+08:00",
+        )
 
     def test_update_instance_traffic_quota_sets_metadata_and_baseline(self):
         old_values = (app.DATA_DIR, app.TRAFFIC_FILE)
@@ -778,15 +792,16 @@ class ValidationTests(unittest.TestCase):
                 with (
                     mock.patch("app.require_node", return_value="node-a"),
                     mock.patch("app.run_incus", side_effect=[
-                        json.dumps(instance), None, None, json.dumps(state),
+                        json.dumps(instance), None, None, None, json.dumps(state),
                     ]) as run_incus,
                 ):
                     result = app.update_instance_traffic_quota(
-                        "node-a", "web-01", 500 * 1024**3, "notify", True,
+                        "node-a", "web-01", 500 * 1024**3, "notify", True, 15,
                     )
                 self.assertEqual(result["limit_bytes"], 500 * 1024**3)
                 self.assertEqual(result["action"], "notify")
-                self.assertEqual(run_incus.call_args_list[1:3], [
+                self.assertEqual(result["reset_day"], 15)
+                self.assertEqual(run_incus.call_args_list[1:4], [
                     mock.call(
                         "config", "set", "node-a:web-01",
                         "user.incus-cn-panel.traffic-limit-bytes", str(500 * 1024**3),
@@ -795,11 +810,59 @@ class ValidationTests(unittest.TestCase):
                         "config", "set", "node-a:web-01",
                         "user.incus-cn-panel.traffic-action", "notify",
                     ),
+                    mock.call(
+                        "config", "set", "node-a:web-01",
+                        "user.incus-cn-panel.traffic-reset-day", "15",
+                    ),
                 ])
                 record = app.read_traffic_data()["instances"]["node-a/web-01"]
                 self.assertEqual(record["last_rx_bytes"], 1234)
                 self.assertEqual(record["last_tx_bytes"], 5678)
                 self.assertEqual(record["used_bytes"], 0)
+                self.assertEqual(record["reset_day"], 15)
+        finally:
+            app.DATA_DIR, app.TRAFFIC_FILE = old_values
+
+    def test_disabling_traffic_quota_removes_reset_day_metadata(self):
+        old_values = (app.DATA_DIR, app.TRAFFIC_FILE)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.TRAFFIC_FILE = os.path.join(directory, "traffic-usage.json")
+                instance = {
+                    "name": "web-01", "type": "container", "status": "Stopped",
+                    "config": {
+                        "user.incus-cn-panel.traffic-limit-bytes": str(500 * 1024**3),
+                        "user.incus-cn-panel.traffic-action": "stop",
+                        "user.incus-cn-panel.traffic-reset-day": "15",
+                    },
+                    "expanded_devices": {},
+                }
+                with (
+                    mock.patch("app.require_node", return_value="node-a"),
+                    mock.patch("app.run_incus", side_effect=[
+                        json.dumps(instance), None, None, None,
+                    ]) as run_incus,
+                ):
+                    result = app.update_instance_traffic_quota(
+                        "node-a", "web-01", 0, "stop", False, 15,
+                    )
+                self.assertEqual(result["limit_bytes"], 0)
+                self.assertEqual(result["reset_day"], 1)
+                self.assertEqual(run_incus.call_args_list[1:], [
+                    mock.call(
+                        "config", "unset", "node-a:web-01",
+                        "user.incus-cn-panel.traffic-limit-bytes",
+                    ),
+                    mock.call(
+                        "config", "unset", "node-a:web-01",
+                        "user.incus-cn-panel.traffic-action",
+                    ),
+                    mock.call(
+                        "config", "unset", "node-a:web-01",
+                        "user.incus-cn-panel.traffic-reset-day",
+                    ),
+                ])
         finally:
             app.DATA_DIR, app.TRAFFIC_FILE = old_values
 
@@ -1862,6 +1925,7 @@ class ValidationTests(unittest.TestCase):
                 "port_end": "10010",
                 "traffic_limit_bytes": str(500 * 1024**3),
                 "traffic_action": "stop",
+                "traffic_reset_day": 15,
             })
         self.assertEqual(result, ("node-hk-01", "web-01", access))
         port_is_used.assert_called_once_with("node-hk-01", "22001")
@@ -1869,6 +1933,7 @@ class ValidationTests(unittest.TestCase):
         save_credentials.assert_called_once_with("node-hk-01", "web-01", access)
         initialize_traffic.assert_called_once_with(
             "node-hk-01", "web-01", 500 * 1024**3, "stop", reset=True,
+            reset_day=15,
         )
         init_call = next(call for call in run_incus.call_args_list if call.args[0] == "init")
         self.assertIn("limits.cpu=2", init_call.args)
@@ -1876,6 +1941,7 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("limits.memory.swap=512MiB", init_call.args)
         self.assertIn(f"user.incus-cn-panel.traffic-limit-bytes={500 * 1024**3}", init_call.args)
         self.assertIn("user.incus-cn-panel.traffic-action=stop", init_call.args)
+        self.assertIn("user.incus-cn-panel.traffic-reset-day=15", init_call.args)
         self.assertIn(
             mock.call(
                 "config", "device", "add", "node-hk-01:web-01", "ssh", "proxy",

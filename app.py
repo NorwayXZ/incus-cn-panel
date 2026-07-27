@@ -1271,6 +1271,9 @@ def parse_instances(node, raw):
             "traffic_action": config.get(
                 "user.incus-cn-panel.traffic-action", "stop"
             ),
+            "traffic_reset_day": normalized_traffic_reset_day(
+                config.get("user.incus-cn-panel.traffic-reset-day", 1)
+            ),
             "network_rx_bytes": network_rx_bytes,
             "network_tx_bytes": network_tx_bytes,
             "memory_used_bytes": int(memory_state.get("usage", 0) or 0),
@@ -2792,9 +2795,48 @@ def start_panel_update(target_version):
         return queued
 
 
-def traffic_period(now=None):
-    now = now or datetime.now(PANEL_TIMEZONE)
-    return now.astimezone(PANEL_TIMEZONE).strftime("%Y-%m")
+def validate_traffic_reset_day(value):
+    try:
+        day = int(str(value or "1"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("流量重置日无效") from exc
+    if not 1 <= day <= 28:
+        raise ValueError("流量重置日必须在每月 1 日到 28 日之间")
+    return day
+
+
+def normalized_traffic_reset_day(value):
+    try:
+        return validate_traffic_reset_day(value)
+    except ValueError:
+        return 1
+
+
+def traffic_cycle(now=None, reset_day=1):
+    day = validate_traffic_reset_day(reset_day)
+    local = (now or datetime.now(PANEL_TIMEZONE)).astimezone(PANEL_TIMEZONE)
+    if local.day >= day:
+        start_year, start_month = local.year, local.month
+    elif local.month == 1:
+        start_year, start_month = local.year - 1, 12
+    else:
+        start_year, start_month = local.year, local.month - 1
+    if start_month == 12:
+        next_year, next_month = start_year + 1, 1
+    else:
+        next_year, next_month = start_year, start_month + 1
+    start = datetime(start_year, start_month, day, tzinfo=PANEL_TIMEZONE)
+    next_reset = datetime(next_year, next_month, day, tzinfo=PANEL_TIMEZONE)
+    period = start.strftime("%Y-%m") if day == 1 else start.strftime("%Y-%m") + f"@{day:02d}"
+    return period, next_reset
+
+
+def traffic_period(now=None, reset_day=1):
+    return traffic_cycle(now, reset_day)[0]
+
+
+def traffic_next_reset_at(now=None, reset_day=1):
+    return traffic_cycle(now, reset_day)[1].isoformat(timespec="seconds")
 
 
 def default_traffic_data():
@@ -2839,14 +2881,17 @@ def validate_traffic_quota(limit_value, action="stop"):
 
 def attach_traffic_usage(instances):
     data = read_traffic_data()
-    period = traffic_period()
     records = data["instances"]
     for instance in instances:
         limit = int(instance.get("traffic_limit_bytes", 0) or 0)
+        reset_day = normalized_traffic_reset_day(instance.get("traffic_reset_day", 1))
+        period = traffic_period(reset_day=reset_day)
         record = records.get(_traffic_key(instance["node"], instance["name"]), {})
         used = int(record.get("used_bytes", 0) or 0) if record.get("period") == period else 0
         instance.update({
             "traffic_period": period,
+            "traffic_reset_day": reset_day,
+            "traffic_next_reset_at": traffic_next_reset_at(reset_day=reset_day),
             "traffic_used_bytes": used,
             "traffic_remaining_bytes": max(0, limit - used) if limit else 0,
             "traffic_exceeded": bool(limit and used >= limit),
@@ -2856,17 +2901,22 @@ def attach_traffic_usage(instances):
     return instances
 
 
-def initialize_traffic_usage(node, name, limit, action, rx_bytes=0, tx_bytes=0, reset=True):
+def initialize_traffic_usage(
+    node, name, limit, action, rx_bytes=0, tx_bytes=0, reset=True, reset_day=1,
+):
     key = _traffic_key(node, name)
+    reset_day = validate_traffic_reset_day(reset_day)
+    period = traffic_period(reset_day=reset_day)
     with TRAFFIC_LOCK:
         data = _read_private_json(TRAFFIC_FILE, default_traffic_data())
         records = data.setdefault("instances", {})
         existing = records.get(key, {})
-        used = 0 if reset or existing.get("period") != traffic_period() else int(
+        used = 0 if reset or existing.get("period") != period else int(
             existing.get("used_bytes", 0) or 0
         )
         records[key] = {
-            "period": traffic_period(),
+            "period": period,
+            "reset_day": reset_day,
             "used_bytes": used,
             "last_rx_bytes": max(0, int(rx_bytes or 0)),
             "last_tx_bytes": max(0, int(tx_bytes or 0)),
@@ -2901,10 +2951,16 @@ def traffic_quota_status(node, name, config=None):
     config = config or {}
     limit = int(config.get("user.incus-cn-panel.traffic-limit-bytes", 0) or 0)
     action = config.get("user.incus-cn-panel.traffic-action", "stop")
+    reset_day = normalized_traffic_reset_day(
+        config.get("user.incus-cn-panel.traffic-reset-day", 1)
+    )
+    period = traffic_period(reset_day=reset_day)
     record = read_traffic_data()["instances"].get(_traffic_key(node, name), {})
-    used = int(record.get("used_bytes", 0) or 0) if record.get("period") == traffic_period() else 0
+    used = int(record.get("used_bytes", 0) or 0) if record.get("period") == period else 0
     return {
-        "period": traffic_period(),
+        "period": period,
+        "reset_day": reset_day,
+        "next_reset_at": traffic_next_reset_at(reset_day=reset_day),
         "limit_bytes": limit,
         "used_bytes": used,
         "remaining_bytes": max(0, limit - used) if limit else 0,
@@ -2915,13 +2971,16 @@ def traffic_quota_status(node, name, config=None):
     }
 
 
-def update_instance_traffic_quota(node, name, limit_value, action="stop", reset_usage=False):
+def update_instance_traffic_quota(
+    node, name, limit_value, action="stop", reset_usage=False, reset_day=1,
+):
     node = require_node(node)
     if not NAME_RE.fullmatch(name):
         raise ValueError("实例名称无效")
     if not isinstance(reset_usage, bool):
         raise ValueError("流量归零参数无效")
     limit, action = validate_traffic_quota(limit_value, action)
+    reset_day = validate_traffic_reset_day(reset_day)
     ref = f"{node}:{name}"
     with INSTANCE_MUTATION_LOCK:
         instance = json.loads(
@@ -2931,11 +2990,17 @@ def update_instance_traffic_quota(node, name, limit_value, action="stop", reset_
         if limit:
             run_incus("config", "set", ref, "user.incus-cn-panel.traffic-limit-bytes", str(limit))
             run_incus("config", "set", ref, "user.incus-cn-panel.traffic-action", action)
+            run_incus(
+                "config", "set", ref,
+                "user.incus-cn-panel.traffic-reset-day", str(reset_day),
+            )
         else:
             if config.get("user.incus-cn-panel.traffic-limit-bytes"):
                 run_incus("config", "unset", ref, "user.incus-cn-panel.traffic-limit-bytes")
             if config.get("user.incus-cn-panel.traffic-action"):
                 run_incus("config", "unset", ref, "user.incus-cn-panel.traffic-action")
+            if config.get("user.incus-cn-panel.traffic-reset-day"):
+                run_incus("config", "unset", ref, "user.incus-cn-panel.traffic-reset-day")
             remove_traffic_usage(node, name)
             return traffic_quota_status(node, name, {})
         state = {}
@@ -2948,17 +3013,18 @@ def update_instance_traffic_quota(node, name, limit_value, action="stop", reset_
             node, name, limit, action,
             parsed["network_rx_bytes"], parsed["network_tx_bytes"],
             reset=reset_usage or not config.get("user.incus-cn-panel.traffic-limit-bytes"),
+            reset_day=reset_day,
         )
     updated_config = {
         "user.incus-cn-panel.traffic-limit-bytes": str(limit),
         "user.incus-cn-panel.traffic-action": action,
+        "user.incus-cn-panel.traffic-reset-day": str(reset_day),
     }
     return traffic_quota_status(node, name, updated_config)
 
 
 def update_traffic_usage(instances):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    period = traffic_period()
     enforcement = []
     with TRAFFIC_LOCK:
         data = _read_private_json(TRAFFIC_FILE, default_traffic_data())
@@ -2968,6 +3034,8 @@ def update_traffic_usage(instances):
             if not limit:
                 continue
             action = instance.get("traffic_action", "stop")
+            reset_day = normalized_traffic_reset_day(instance.get("traffic_reset_day", 1))
+            period = traffic_period(reset_day=reset_day)
             key = _traffic_key(instance["node"], instance["name"])
             record = records.get(key, {})
             rx_bytes = int(instance.get("network_rx_bytes", 0) or 0)
@@ -2989,6 +3057,7 @@ def update_traffic_usage(instances):
             records[key] = {
                 **record,
                 "period": period,
+                "reset_day": reset_day,
                 "used_bytes": used,
                 "last_rx_bytes": rx_bytes,
                 "last_tx_bytes": tx_bytes,
@@ -3807,6 +3876,7 @@ def create_instance(data, validate_capacity=False):
     traffic_limit, traffic_action = validate_traffic_quota(
         data.get("traffic_limit_bytes", 0), data.get("traffic_action", "stop")
     )
+    traffic_reset_day = validate_traffic_reset_day(data.get("traffic_reset_day", 1))
     if not NAME_RE.fullmatch(name):
         raise ValueError("名称只能包含字母、数字和连字符，最长 63 位")
     if kind not in {"container", "virtual-machine"}:
@@ -3879,6 +3949,7 @@ def create_instance(data, validate_capacity=False):
             init_args.extend([
                 "-c", f"user.incus-cn-panel.traffic-limit-bytes={traffic_limit}",
                 "-c", f"user.incus-cn-panel.traffic-action={traffic_action}",
+                "-c", f"user.incus-cn-panel.traffic-reset-day={traffic_reset_day}",
             ])
         if port_range:
             init_args.extend([
@@ -3929,7 +4000,8 @@ def create_instance(data, validate_capacity=False):
             save_instance_credentials(node, name, access)
             if traffic_limit:
                 initialize_traffic_usage(
-                    node, name, traffic_limit, traffic_action, reset=True
+                    node, name, traffic_limit, traffic_action, reset=True,
+                    reset_day=traffic_reset_day,
                 )
         except Exception:
             if created:
@@ -5748,6 +5820,7 @@ class Handler(BaseHTTPRequestHandler):
                 traffic = update_instance_traffic_quota(
                     node, name, data.get("traffic_limit_bytes", 0),
                     data.get("traffic_action", "stop"), data.get("reset_usage", False),
+                    data.get("traffic_reset_day", 1),
                 )
                 record_operation(
                     "instance_traffic_update", name, node,
