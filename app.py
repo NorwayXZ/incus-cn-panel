@@ -40,6 +40,10 @@ USERS_FILE = os.path.join(DATA_DIR, "users.json")
 NOTIFICATION_CONFIG_FILE = os.path.join(DATA_DIR, "notification-config.json")
 NOTIFICATIONS_FILE = os.path.join(DATA_DIR, "notifications.json")
 TRAFFIC_FILE = os.path.join(DATA_DIR, "traffic-usage.json")
+BACKUPS_FILE = os.path.join(DATA_DIR, "backups.json")
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+DOMAINS_FILE = os.path.join(DATA_DIR, "domain-routes.json")
+CADDY_ROUTES_FILE = os.path.join(DATA_DIR, "Caddyfile.routes")
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
 UPDATE_STATUS_FILE = os.path.join(DATA_DIR, "update-status.json")
@@ -61,6 +65,8 @@ CREDENTIALS_LOCK = threading.Lock()
 USERS_LOCK = threading.Lock()
 NOTIFICATION_LOCK = threading.RLock()
 TRAFFIC_LOCK = threading.RLock()
+BACKUP_LOCK = threading.RLock()
+DOMAIN_LOCK = threading.RLock()
 UPDATE_LOCK = threading.RLock()
 TASK_LOCK = threading.RLock()
 NODE_HEALTH_LOCK = threading.RLock()
@@ -73,6 +79,7 @@ TASK_FUTURES = {}
 TASK_EXECUTOR = None
 TASK_RUNNERS = {}
 LAST_RECONCILE_AT = 0.0
+BACKUP_WAKE_EVENT = threading.Event()
 SESSION_TTL = 12 * 60 * 60
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,31}$")
@@ -81,6 +88,9 @@ SIZE_VALUE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([KMGTPE]?i?B)$", re.IGNORECA
 RATE_RE = re.compile(r"^[1-9][0-9]*(kbit|Mbit|Gbit)$")
 IMAGE_ALIAS_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,127}$")
 FINGERPRINT_RE = re.compile(r"^[a-fA-F0-9]{12,64}$")
+SNAPSHOT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$")
+BACKUP_ID_RE = re.compile(r"^[a-f0-9]{16}$")
 SSH_PORT_MIN = 22000
 SSH_PORT_MAX = 59999
 HOST_PORT_MIN = 1024
@@ -2828,6 +2838,8 @@ def overview_for_session(session):
             "notifications": notification_payload(),
             "tasks": list_tasks(session),
             "reconcile": read_reconcile_status(),
+            "backups": public_backups(),
+            "domains": read_domain_routes(),
         }
     record = get_user_account(session["username"]) or {}
     active = {
@@ -2859,6 +2871,8 @@ def overview_for_session(session):
         "notifications": {},
         "tasks": list_tasks(session),
         "reconcile": {},
+        "backups": {"backups": [], "policies": {}},
+        "domains": {"routes": [], "apply": {}},
     }
 
 
@@ -2873,6 +2887,17 @@ def occupied_host_ports(instances):
         end = str(config.get("user.incus-cn-panel.port-end", item.get("port_end", "")))
         if start.isdigit() and end.isdigit() and HOST_PORT_MIN <= int(start) <= int(end) <= HOST_PORT_MAX:
             occupied.update(range(int(start), int(end) + 1))
+        devices = item.get("expanded_devices") or item.get("devices") or {}
+        for device in devices.values():
+            if not isinstance(device, dict) or device.get("type") != "proxy":
+                continue
+            match = re.search(r"^(?:tcp|udp):[^:]+:(\d+)(?:-(\d+))?$", str(device.get("listen", "")))
+            if not match:
+                continue
+            first = int(match.group(1))
+            last = int(match.group(2) or first)
+            if HOST_PORT_MIN <= first <= last <= HOST_PORT_MAX and last - first <= MAX_PORTS_PER_INSTANCE:
+                occupied.update(range(first, last + 1))
     return occupied
 
 
@@ -3361,6 +3386,487 @@ def create_batch_instances(data, progress=None):
     return node, created
 
 
+def validate_instance_identity(node, name):
+    node = require_node(str(node))
+    name = str(name)
+    if not NAME_RE.fullmatch(name):
+        raise ValueError("实例名称无效")
+    return node, name, f"{node}:{name}"
+
+
+def list_instance_snapshots(node, name):
+    node, name, ref = validate_instance_identity(node, name)
+    raw = json.loads(run_incus("snapshot", "list", ref, "--format=json", timeout=30))
+    snapshots = []
+    for item in raw if isinstance(raw, list) else []:
+        snapshot_name = str(item.get("name", "")).split("/")[-1]
+        if not SNAPSHOT_RE.fullmatch(snapshot_name):
+            continue
+        snapshots.append({
+            "name": snapshot_name,
+            "created_at": str(item.get("created_at") or item.get("created") or ""),
+            "expires_at": str(item.get("expires_at") or ""),
+            "stateful": bool(item.get("stateful", False)),
+        })
+    return sorted(snapshots, key=lambda item: item["created_at"], reverse=True)
+
+
+def create_snapshot(node, name, snapshot_name):
+    node, name, ref = validate_instance_identity(node, name)
+    snapshot_name = str(snapshot_name).strip()
+    if not SNAPSHOT_RE.fullmatch(snapshot_name):
+        raise ValueError("快照名称只能包含字母、数字、点、下划线和连字符")
+    run_incus("snapshot", "create", ref, snapshot_name, timeout=600)
+    return list_instance_snapshots(node, name)
+
+
+def restore_snapshot(node, name, snapshot_name):
+    node, name, ref = validate_instance_identity(node, name)
+    if not SNAPSHOT_RE.fullmatch(str(snapshot_name)):
+        raise ValueError("快照名称无效")
+    instance = json.loads(run_incus("query", f"{node}:/1.0/instances/{name}?recursion=1", timeout=30))
+    was_running = instance.get("status") == "Running"
+    if was_running:
+        run_incus("stop", ref, "--force", timeout=300)
+    try:
+        run_incus("snapshot", "restore", ref, str(snapshot_name), timeout=900)
+    except Exception:
+        if was_running:
+            try:
+                run_incus("start", ref, timeout=300)
+            except Exception:
+                pass
+        raise
+    if was_running:
+        run_incus("start", ref, timeout=300)
+
+
+def delete_snapshot(node, name, snapshot_name):
+    node, name, ref = validate_instance_identity(node, name)
+    if not SNAPSHOT_RE.fullmatch(str(snapshot_name)):
+        raise ValueError("快照名称无效")
+    run_incus("snapshot", "delete", ref, str(snapshot_name), timeout=300)
+
+
+def default_backups_data():
+    return {"version": 1, "backups": [], "policies": {}}
+
+
+def read_backups_data():
+    with BACKUP_LOCK:
+        data = _read_private_json(BACKUPS_FILE, default_backups_data())
+    if not isinstance(data.get("backups"), list):
+        data["backups"] = []
+    if not isinstance(data.get("policies"), dict):
+        data["policies"] = {}
+    return data
+
+
+def _write_backups_data(data):
+    data["version"] = 1
+    _write_private_json(BACKUPS_FILE, data)
+
+
+def public_backups():
+    data = read_backups_data()
+    backups = []
+    for item in data["backups"]:
+        filename = os.path.join(BACKUP_DIR, f"{item.get('id', '')}.tar.gz")
+        if os.path.isfile(filename):
+            backups.append({**item, "size": os.path.getsize(filename)})
+    backups.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return {"backups": backups, "policies": data["policies"]}
+
+
+def create_instance_backup(node, name, reason="manual"):
+    node, name, ref = validate_instance_identity(node, name)
+    backup_id = secrets.token_hex(8)
+    os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+    filename = os.path.join(BACKUP_DIR, f"{backup_id}.tar.gz")
+    try:
+        run_incus("export", ref, filename, timeout=3600)
+        os.chmod(filename, 0o600)
+        record = {
+            "id": backup_id, "node": node, "name": name, "reason": str(reason),
+            "created_at": utc_now(), "size": os.path.getsize(filename),
+        }
+        with BACKUP_LOCK:
+            data = _read_private_json(BACKUPS_FILE, default_backups_data())
+            data.setdefault("backups", []).append(record)
+            _write_backups_data(data)
+        enforce_backup_retention(node, name)
+        return record
+    except Exception:
+        try:
+            os.unlink(filename)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def restore_instance_backup(backup_id):
+    if not BACKUP_ID_RE.fullmatch(str(backup_id)):
+        raise ValueError("备份编号无效")
+    data = read_backups_data()
+    backup = next((item for item in data["backups"] if item.get("id") == backup_id), None)
+    if not backup:
+        raise ValueError("备份不存在")
+    node = require_node(str(backup.get("node", "")))
+    filename = os.path.join(BACKUP_DIR, f"{backup_id}.tar.gz")
+    if not os.path.isfile(filename):
+        raise ValueError("备份文件已经丢失")
+    raw = json.loads(run_incus("list", f"{node}:", "--format=json", timeout=30))
+    if any(item.get("name") == backup.get("name") for item in raw):
+        raise ValueError("同名实例仍然存在，请先删除或迁移后再恢复")
+    run_incus("import", filename, f"{node}:", timeout=3600)
+    return node, str(backup.get("name", ""))
+
+
+def delete_instance_backup(backup_id):
+    if not BACKUP_ID_RE.fullmatch(str(backup_id)):
+        raise ValueError("备份编号无效")
+    with BACKUP_LOCK:
+        data = _read_private_json(BACKUPS_FILE, default_backups_data())
+        before = len(data.setdefault("backups", []))
+        data["backups"] = [item for item in data["backups"] if item.get("id") != backup_id]
+        if len(data["backups"]) == before:
+            raise ValueError("备份不存在")
+        _write_backups_data(data)
+    try:
+        os.unlink(os.path.join(BACKUP_DIR, f"{backup_id}.tar.gz"))
+    except FileNotFoundError:
+        pass
+
+
+def update_backup_policy(node, name, schedule, retention):
+    node, name, _ = validate_instance_identity(node, name)
+    schedule = str(schedule)
+    if schedule not in {"off", "daily", "weekly"}:
+        raise ValueError("备份周期无效")
+    try:
+        retention = int(retention)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("备份保留数量无效") from exc
+    if not 1 <= retention <= 30:
+        raise ValueError("备份保留数量必须在 1 到 30 之间")
+    key = f"{node}/{name}"
+    with BACKUP_LOCK:
+        data = _read_private_json(BACKUPS_FILE, default_backups_data())
+        policies = data.setdefault("policies", {})
+        if schedule == "off":
+            policies.pop(key, None)
+        else:
+            policies[key] = {
+                "node": node, "name": name, "schedule": schedule,
+                "retention": retention, "updated_at": utc_now(),
+                "last_backup_at": policies.get(key, {}).get("last_backup_at", ""),
+            }
+        _write_backups_data(data)
+    BACKUP_WAKE_EVENT.set()
+    return public_backups()["policies"].get(key, {})
+
+
+def enforce_backup_retention(node, name):
+    key = f"{node}/{name}"
+    remove_ids = set()
+    with BACKUP_LOCK:
+        data = _read_private_json(BACKUPS_FILE, default_backups_data())
+        policy = data.get("policies", {}).get(key)
+        if not policy:
+            return
+        retention = int(policy.get("retention", 5) or 5)
+        matching = sorted(
+            [item for item in data.setdefault("backups", []) if item.get("node") == node and item.get("name") == name],
+            key=lambda item: item.get("created_at", ""), reverse=True,
+        )
+        remove_ids = {item["id"] for item in matching[retention:]}
+        if remove_ids:
+            data["backups"] = [item for item in data["backups"] if item.get("id") not in remove_ids]
+            _write_backups_data(data)
+    for backup_id in remove_ids:
+        try:
+            os.unlink(os.path.join(BACKUP_DIR, f"{backup_id}.tar.gz"))
+        except FileNotFoundError:
+            pass
+
+
+def backup_scheduler_loop():
+    while True:
+        try:
+            data = read_backups_data()
+            now = datetime.now(timezone.utc)
+            for key, policy in data["policies"].items():
+                try:
+                    last_text = str(policy.get("last_backup_at", ""))
+                    last = datetime.fromisoformat(last_text.replace("Z", "+00:00")) if last_text else None
+                    interval = timedelta(days=1 if policy.get("schedule") == "daily" else 7)
+                    if last and now - last < interval:
+                        continue
+                    task = enqueue_task(
+                        "backup_create", f"定时备份 {policy['name']}",
+                        node=policy["node"], target=policy["name"],
+                        payload={"node": policy["node"], "name": policy["name"], "reason": policy["schedule"]},
+                        owner="admin",
+                    )
+                    if task.get("status") in {"queued", "running"}:
+                        with BACKUP_LOCK:
+                            current = _read_private_json(BACKUPS_FILE, default_backups_data())
+                            if key in current.setdefault("policies", {}):
+                                current["policies"][key]["last_backup_at"] = utc_now()
+                                _write_backups_data(current)
+                except Exception as exc:
+                    print(f"自动备份 {key} 启动失败: {exc}", flush=True)
+        except Exception as exc:
+            print(f"备份调度失败: {exc}", flush=True)
+        BACKUP_WAKE_EVENT.wait(300)
+        BACKUP_WAKE_EVENT.clear()
+
+
+def move_instance_metadata(source, target, name):
+    try:
+        access = instance_credentials(source, name)
+    except ValueError:
+        access = None
+    delete_credentials(source, name)
+    if access:
+        access["host"] = node_host(target)
+        save_instance_credentials(target, name, access)
+    with TRAFFIC_LOCK:
+        data = _read_private_json(TRAFFIC_FILE, default_traffic_data())
+        records = data.setdefault("instances", {})
+        old_key, new_key = f"{source}/{name}", f"{target}/{name}"
+        if old_key in records:
+            records[new_key] = records.pop(old_key)
+            _write_traffic_data(data)
+    with USERS_LOCK:
+        users = _read_users_unlocked()
+        changed = False
+        for record in users.values():
+            assignments = assignment_map(record)
+            if old_key in assignments:
+                assignments[new_key] = assignments.pop(old_key)
+                record["assignments"] = assignments
+                changed = True
+        if changed:
+            _write_users_unlocked(users)
+
+
+def migrate_instance(source, target, name):
+    source, name, source_ref = validate_instance_identity(source, name)
+    target = require_node(str(target))
+    if source == target:
+        raise ValueError("目标宿主机不能与当前宿主机相同")
+    instance = json.loads(run_incus("query", f"{source}:/1.0/instances/{name}?recursion=1", timeout=30))
+    parsed = parse_instances(source, [instance])[0]
+    target_info = live_node_info(target)
+    allowance_text = str(instance.get("config", {}).get("limits.cpu.allowance", ""))
+    hard_allowance = re.fullmatch(r"(\d+)ms/(\d+)ms", allowance_text)
+    soft_allowance = re.fullmatch(r"(\d+)%", allowance_text)
+    if hard_allowance and int(hard_allowance.group(2)):
+        cpu_allowance = max(1, int(hard_allowance.group(1)) * 100 // int(hard_allowance.group(2)))
+    elif soft_allowance:
+        cpu_allowance = max(1, int(soft_allowance.group(1)))
+    else:
+        cpu_allowance = int(parsed["cpu"]) * 100
+    config = {
+        "type": parsed["type"], "cpu": parsed["cpu"],
+        "cpu_allowance": str(cpu_allowance),
+        "memory": parsed["memory"], "disk": parsed["disk"], "port_count": "0",
+    }
+    if maximum_instances(target_info, config)[0] < 1:
+        raise ValueError("目标宿主机的 CPU、内存或磁盘安全预算不足")
+    source_ports = occupied_host_ports([instance])
+    target_ports = occupied_host_ports(target_info.get("instances", []))
+    conflict = next((port for port in source_ports if port in target_ports), None)
+    if conflict is not None:
+        raise ValueError(f"目标宿主机端口 {conflict} 已被占用")
+    was_running = instance.get("status") == "Running"
+    if was_running:
+        run_incus("stop", source_ref, "--force", timeout=300)
+    try:
+        run_incus("move", source_ref, f"{target}:{name}", timeout=3600)
+    except Exception:
+        if was_running:
+            try:
+                run_incus("start", source_ref, timeout=180)
+            except Exception:
+                pass
+        raise
+    move_instance_metadata(source, target, name)
+    if was_running:
+        run_incus("start", f"{target}:{name}", timeout=300)
+    return target, name
+
+
+def rebuild_instance(node, name, image):
+    node, name, ref = validate_instance_identity(node, name)
+    instance = json.loads(run_incus("query", f"{node}:/1.0/instances/{name}?recursion=1", timeout=30))
+    kind = "virtual-machine" if instance.get("type") == "virtual-machine" else "container"
+    resolved = resolve_image(node, str(image), kind)
+    run_incus("rebuild", resolved["reference"], ref, "--force", timeout=1800)
+    run_incus("config", "set", ref, "user.incus-cn-panel.image", str(image))
+    delete_credentials(node, name)
+    return configure_instance_access(node, name)
+
+
+def run_instance_console(node, name, command):
+    node, name, ref = validate_instance_identity(node, name)
+    command = str(command).strip()
+    if not command or len(command) > 1000 or "\x00" in command:
+        raise ValueError("命令长度必须在 1 到 1000 个字符之间")
+    output = run_incus("exec", ref, "--", "sh", "-lc", command, timeout=30)
+    return output[-20000:]
+
+
+def list_instance_port_rules(node, name):
+    node, name, _ = validate_instance_identity(node, name)
+    instance = json.loads(run_incus("query", f"{node}:/1.0/instances/{name}?recursion=1", timeout=30))
+    devices = instance.get("expanded_devices") or instance.get("devices") or {}
+    rules = []
+    for device_name, device in devices.items():
+        if not str(device_name).startswith("panel-port-") or device.get("type") != "proxy":
+            continue
+        listen = re.search(r"^(tcp|udp):[^:]+:(\d+)$", str(device.get("listen", "")))
+        connect = re.search(r"^(tcp|udp):[^:]+:(\d+)$", str(device.get("connect", "")))
+        if listen and connect:
+            rules.append({
+                "id": str(device_name), "protocol": listen.group(1),
+                "host_port": int(listen.group(2)), "guest_port": int(connect.group(2)),
+            })
+    return sorted(rules, key=lambda item: (item["protocol"], item["host_port"]))
+
+
+def add_instance_port_rule(node, name, protocol, host_port, guest_port):
+    node, name, ref = validate_instance_identity(node, name)
+    protocol = str(protocol).lower()
+    if protocol not in {"tcp", "udp"}:
+        raise ValueError("端口协议只能是 TCP 或 UDP")
+    try:
+        host_port, guest_port = int(host_port), int(guest_port)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("端口必须是整数") from exc
+    if not 1024 <= host_port <= 65535 or not 1 <= guest_port <= 65535:
+        raise ValueError("宿主机端口需在 1024-65535，实例端口需在 1-65535")
+    if port_is_used(node, host_port):
+        raise ValueError("宿主机端口已被其他实例占用")
+    rule_id = f"panel-port-{secrets.token_hex(4)}"
+    run_incus(
+        "config", "device", "add", ref, rule_id, "proxy",
+        f"listen={protocol}:0.0.0.0:{host_port}",
+        f"connect={protocol}:127.0.0.1:{guest_port}",
+    )
+    return list_instance_port_rules(node, name)
+
+
+def delete_instance_port_rule(node, name, rule_id):
+    node, name, ref = validate_instance_identity(node, name)
+    if not re.fullmatch(r"panel-port-[a-f0-9]{8}", str(rule_id)):
+        raise ValueError("端口规则编号无效")
+    run_incus("config", "device", "remove", ref, str(rule_id))
+    return list_instance_port_rules(node, name)
+
+
+def default_domain_routes():
+    return {"version": 1, "routes": [], "apply": {"status": "idle", "message": ""}}
+
+
+def read_domain_routes():
+    with DOMAIN_LOCK:
+        data = _read_private_json(DOMAINS_FILE, default_domain_routes())
+    if not isinstance(data.get("routes"), list):
+        data["routes"] = []
+    return data
+
+
+def write_caddy_routes(data):
+    lines = ["# Generated by Incus Control. Do not edit manually.", ""]
+    for route in sorted(data.get("routes", []), key=lambda item: item["domain"]):
+        lines.extend([
+            route["domain"] + " {",
+            f"    reverse_proxy {route['target_host']}:{route['host_port']}",
+            "}", "",
+        ])
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    temporary = f"{CADDY_ROUTES_FILE}.{os.getpid()}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+    os.replace(temporary, CADDY_ROUTES_FILE)
+    apply_status = {"status": "generated", "message": f"配置已生成：{CADDY_ROUTES_FILE}"}
+    caddy = shutil.which("caddy")
+    if not data.get("routes"):
+        subprocess.run(["systemctl", "stop", "incus-cn-panel-proxy.service"], capture_output=True)
+        return {"status": "idle", "message": "当前没有域名路由"}
+    if not caddy:
+        return {"status": "pending", "message": "未安装 Caddy，配置已保存但尚未生效"}
+    existing = subprocess.run(["systemctl", "is-active", "caddy.service"], capture_output=True, text=True)
+    if existing.returncode == 0:
+        return {"status": "pending", "message": "检测到系统已有 Caddy；请在现有 Caddyfile 中 import 生成的配置"}
+    validation = subprocess.run(
+        [caddy, "validate", "--config", CADDY_ROUTES_FILE], capture_output=True, text=True, timeout=20,
+    )
+    if validation.returncode != 0:
+        return {"status": "failed", "message": (validation.stderr or validation.stdout)[-500:]}
+    start = subprocess.run(
+        ["systemctl", "enable", "--now", "incus-cn-panel-proxy.service"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if start.returncode != 0:
+        return {"status": "pending", "message": (start.stderr or start.stdout or "Caddy 启动失败")[-500:]}
+    restart = subprocess.run(
+        ["systemctl", "restart", "incus-cn-panel-proxy.service"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if restart.returncode == 0 and shutil.which("ufw"):
+        status = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=10)
+        if "Status: active" in status.stdout:
+            subprocess.run(["ufw", "allow", "80/tcp"], capture_output=True, timeout=20)
+            subprocess.run(["ufw", "allow", "443/tcp"], capture_output=True, timeout=20)
+    return {"status": "active" if restart.returncode == 0 else "pending", "message": "HTTPS 反向代理已生效" if restart.returncode == 0 else (restart.stderr or restart.stdout)[-500:]}
+
+
+def save_domain_route(domain, node, name, host_port):
+    domain = str(domain).strip().lower().rstrip(".")
+    if not DOMAIN_RE.fullmatch(domain):
+        raise ValueError("域名格式无效，请填写完整域名")
+    node, name, _ = validate_instance_identity(node, name)
+    try:
+        host_port = int(host_port)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("反代端口无效") from exc
+    instance = json.loads(run_incus("query", f"{node}:/1.0/instances/{name}?recursion=1", timeout=30))
+    owned_ports = occupied_host_ports([instance])
+    if host_port not in owned_ports:
+        raise ValueError("该端口尚未分配给此实例，请先创建 TCP 端口转发")
+    with DOMAIN_LOCK:
+        data = _read_private_json(DOMAINS_FILE, default_domain_routes())
+        routes = data.setdefault("routes", [])
+        if any(item.get("domain") == domain for item in routes):
+            raise ValueError("该域名已经存在")
+        route = {
+            "id": secrets.token_hex(8), "domain": domain, "node": node, "name": name,
+            "host_port": host_port, "target_host": node_host(node), "created_at": utc_now(),
+        }
+        routes.append(route)
+        data["apply"] = write_caddy_routes(data)
+        _write_private_json(DOMAINS_FILE, data)
+    return route, data["apply"]
+
+
+def delete_domain_route(route_id):
+    if not BACKUP_ID_RE.fullmatch(str(route_id)):
+        raise ValueError("域名路由编号无效")
+    with DOMAIN_LOCK:
+        data = _read_private_json(DOMAINS_FILE, default_domain_routes())
+        before = len(data.setdefault("routes", []))
+        data["routes"] = [item for item in data["routes"] if item.get("id") != route_id]
+        if len(data["routes"]) == before:
+            raise ValueError("域名路由不存在")
+        data["apply"] = write_caddy_routes(data)
+        _write_private_json(DOMAINS_FILE, data)
+    return data
+
+
 def task_create_instance(context, payload):
     name = str(payload.get("name", ""))
     context.update(5, "检查配置", "正在复核宿主机容量、名称和端口")
@@ -3416,11 +3922,125 @@ def task_reconcile(context, payload):
     }
 
 
+def task_instance_action(context, payload):
+    node, name, ref = validate_instance_identity(payload.get("node"), payload.get("name"))
+    action = str(payload.get("action", ""))
+    if action not in {"start", "stop", "restart"}:
+        raise ValueError("不支持的实例操作")
+    context.update(15, "检查实例状态", f"正在准备{action}实例 {name}")
+    if action in {"start", "restart"}:
+        instance = json.loads(run_incus("query", f"{node}:/1.0/instances/{name}?recursion=1", timeout=20))
+        traffic = traffic_quota_status(node, name, instance.get("config") or {})
+        if traffic["exceeded"] and traffic["action"] == "stop":
+            raise ValueError("该实例本月流量已超过配额，请调整配额或重置用量后再启动")
+    args = [action, ref]
+    if action in {"stop", "restart"}:
+        args.append("--force")
+    context.update(45, "执行生命周期操作", f"Incus 正在{action}实例")
+    run_incus(*args, timeout=300)
+    return {"message": f"实例 {name} 操作完成", "node": node, "name": name, "action": action}
+
+
+def _remove_domain_routes_for_instance(node, name):
+    with DOMAIN_LOCK:
+        data = _read_private_json(DOMAINS_FILE, default_domain_routes())
+        before = len(data.setdefault("routes", []))
+        data["routes"] = [
+            item for item in data["routes"]
+            if item.get("node") != node or item.get("name") != name
+        ]
+        if len(data["routes"]) != before:
+            data["apply"] = write_caddy_routes(data)
+            _write_private_json(DOMAINS_FILE, data)
+
+
+def task_instance_delete(context, payload):
+    node, name, ref = validate_instance_identity(payload.get("node"), payload.get("name"))
+    context.update(10, "确认实例", "正在确认实例仍然存在")
+    context.update(35, "永久删除", "正在删除实例及其快照")
+    run_incus("delete", ref, "--force", timeout=600)
+    delete_credentials(node, name)
+    remove_instance_assignments(node, name)
+    remove_traffic_usage(node, name)
+    _remove_domain_routes_for_instance(node, name)
+    return {"message": f"实例 {name} 已永久删除", "node": node, "name": name}
+
+
+def task_snapshot_create(context, payload):
+    context.update(15, "创建快照", "正在冻结实例文件系统并保存快照")
+    snapshots = create_snapshot(payload.get("node"), payload.get("name"), payload.get("snapshot"))
+    return {"message": "快照创建完成", "snapshots": snapshots}
+
+
+def task_snapshot_restore(context, payload):
+    context.update(10, "准备回滚", "正在确认快照和实例状态")
+    context.update(35, "恢复快照", "正在将实例磁盘回滚到快照")
+    restore_snapshot(payload.get("node"), payload.get("name"), payload.get("snapshot"))
+    return {"message": f"已恢复快照 {payload.get('snapshot', '')}"}
+
+
+def task_snapshot_delete(context, payload):
+    context.update(20, "删除快照", "正在释放快照占用空间")
+    delete_snapshot(payload.get("node"), payload.get("name"), payload.get("snapshot"))
+    return {"message": f"快照 {payload.get('snapshot', '')} 已删除"}
+
+
+def task_backup_create(context, payload):
+    context.update(10, "准备导出", "正在检查控制端备份空间")
+    record = create_instance_backup(
+        payload.get("node"), payload.get("name"), payload.get("reason", "manual")
+    )
+    context.update(92, "登记备份", "备份文件已写入控制端")
+    return {"message": f"实例 {record['name']} 备份完成", "backup": record}
+
+
+def task_backup_restore(context, payload):
+    context.update(10, "验证备份", "正在检查备份文件和同名实例")
+    node, name = restore_instance_backup(str(payload.get("backup_id", "")))
+    context.update(88, "恢复连接", "正在重新生成实例 SSH 凭据")
+    delete_credentials(node, name)
+    access = configure_instance_access(node, name)
+    return {"message": f"实例 {name} 已从备份恢复", "node": node, "name": name, "host_port": access["host_port"]}
+
+
+def task_backup_delete(context, payload):
+    context.update(20, "删除备份", "正在删除控制端备份文件")
+    delete_instance_backup(str(payload.get("backup_id", "")))
+    return {"message": "备份文件已删除"}
+
+
+def task_instance_migrate(context, payload):
+    context.update(8, "迁移预检", "正在检查目标资源和端口冲突")
+    target, name = migrate_instance(
+        payload.get("node"), payload.get("target_node"), payload.get("name")
+    )
+    context.update(92, "启动目标实例", "迁移完成，正在确认目标宿主机状态")
+    return {"message": f"实例 {name} 已迁移到 {target}", "node": target, "name": name}
+
+
+def task_instance_rebuild(context, payload):
+    context.update(10, "重装预检", "正在解析目标系统镜像")
+    access = rebuild_instance(
+        payload.get("node"), payload.get("name"), payload.get("image")
+    )
+    return {"message": f"实例 {payload.get('name', '')} 已重装并重置 SSH 密码", "host_port": access["host_port"]}
+
+
 TASK_RUNNERS.update({
     "instance_create": task_create_instance,
     "instance_batch_create": task_create_batch,
     "node_preflight": task_node_preflight,
     "state_reconcile": task_reconcile,
+    "instance_action": task_instance_action,
+    "instance_delete": task_instance_delete,
+    "snapshot_create": task_snapshot_create,
+    "snapshot_restore": task_snapshot_restore,
+    "snapshot_delete": task_snapshot_delete,
+    "backup_create": task_backup_create,
+    "backup_restore": task_backup_restore,
+    "backup_delete": task_backup_delete,
+    "instance_migrate": task_instance_migrate,
+    "instance_rebuild": task_instance_rebuild,
 })
 
 
@@ -3648,6 +4268,48 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
             return
+        manage_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/manage", path)
+        if manage_match:
+            auth = self.require_auth()
+            if not auth:
+                return
+            node, name = manage_match.groups()
+            if not NAME_RE.fullmatch(node) or not NAME_RE.fullmatch(name):
+                self.send_json(400, {"error": "实例名称无效"})
+                return
+            if not self.require_instance_access(auth[1], node, name):
+                return
+            try:
+                payload = {
+                    "node": node, "name": name,
+                    "snapshots": list_instance_snapshots(node, name),
+                    "port_rules": [], "backups": [], "policy": {}, "nodes": [],
+                }
+                if auth[1].get("role") == "admin":
+                    backup_data = public_backups()
+                    key = f"{node}/{name}"
+                    payload.update({
+                        "port_rules": list_instance_port_rules(node, name),
+                        "backups": [item for item in backup_data["backups"] if item.get("node") == node and item.get("name") == name],
+                        "policy": backup_data["policies"].get(key, {}),
+                        "nodes": [item for item in registered_remotes() if item != node],
+                    })
+                self.send_json(200, payload)
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path == "/api/backups":
+            auth = self.require_admin()
+            if not auth:
+                return
+            self.send_json(200, public_backups())
+            return
+        if path == "/api/domains":
+            auth = self.require_admin()
+            if not auth:
+                return
+            self.send_json(200, read_domain_routes())
+            return
         if path == "/api/notifications":
             auth = self.require_admin()
             if not auth:
@@ -3848,6 +4510,178 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     updated = cancel_task(task["id"])
                 self.send_json(202, {"ok": True, "task": updated})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        snapshot_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/snapshots", path)
+        if snapshot_match:
+            node, name = snapshot_match.groups()
+            if not self.require_instance_access(auth[1], node, name):
+                return
+            try:
+                data = self.read_json()
+                action = str(data.get("action", "create"))
+                task_type = {
+                    "create": "snapshot_create", "restore": "snapshot_restore",
+                    "delete": "snapshot_delete",
+                }.get(action)
+                if not task_type:
+                    raise ValueError("快照操作无效")
+                snapshot = str(data.get("snapshot", ""))
+                task = enqueue_task(
+                    task_type, f"{action} 快照 {snapshot}", node=node,
+                    target=f"{name}/{snapshot}",
+                    payload={"node": node, "name": name, "snapshot": snapshot},
+                    owner=auth[1]["username"],
+                )
+                self.send_json(202, {"ok": True, "task": task})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        console_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/console", path)
+        if console_match:
+            node, name = console_match.groups()
+            if not self.require_instance_access(auth[1], node, name):
+                return
+            try:
+                output = run_instance_console(node, name, self.read_json().get("command", ""))
+                record_operation("instance_console", name, node, message=f"由 {auth[1]['username']} 执行命令")
+                self.send_json(200, {"ok": True, "output": output})
+            except subprocess.TimeoutExpired:
+                self.send_json(504, {"error": "命令执行超过 30 秒，已停止等待"})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        policy_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/backup-policy", path)
+        if policy_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                data = self.read_json()
+                policy = update_backup_policy(
+                    policy_match.group(1), policy_match.group(2),
+                    data.get("schedule", "off"), data.get("retention", 5),
+                )
+                self.send_json(200, {"ok": True, "policy": policy})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        backup_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/backup", path)
+        if backup_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                node, name = backup_match.groups()
+                validate_instance_identity(node, name)
+                task = enqueue_task(
+                    "backup_create", f"备份实例 {name}", node=node, target=name,
+                    payload={"node": node, "name": name, "reason": "manual"},
+                    owner=auth[1]["username"],
+                )
+                self.send_json(202, {"ok": True, "task": task})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        backup_action_match = re.fullmatch(r"/api/backups/([a-f0-9]{16})/(restore|delete)", path)
+        if backup_action_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                backup_id, action = backup_action_match.groups()
+                backup = next((item for item in public_backups()["backups"] if item["id"] == backup_id), None)
+                if not backup:
+                    raise ValueError("备份不存在")
+                task = enqueue_task(
+                    f"backup_{action}", f"{action} 备份 {backup['name']}",
+                    node=backup["node"], target=backup["name"],
+                    payload={"backup_id": backup_id}, owner=auth[1]["username"],
+                )
+                self.send_json(202, {"ok": True, "task": task})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        migrate_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/migrate", path)
+        if migrate_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                node, name = migrate_match.groups()
+                target = str(self.read_json().get("target_node", ""))
+                require_node(target)
+                task = enqueue_task(
+                    "instance_migrate", f"迁移实例 {name}", node=node, target=name,
+                    payload={"node": node, "name": name, "target_node": target},
+                    owner=auth[1]["username"],
+                )
+                self.send_json(202, {"ok": True, "task": task})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        rebuild_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/rebuild", path)
+        if rebuild_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                node, name = rebuild_match.groups()
+                image = str(self.read_json().get("image", ""))
+                task = enqueue_task(
+                    "instance_rebuild", f"重装实例 {name}", node=node, target=name,
+                    payload={"node": node, "name": name, "image": image},
+                    owner=auth[1]["username"],
+                )
+                self.send_json(202, {"ok": True, "task": task})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        port_rule_match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/port-rules", path)
+        if port_rule_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                node, name = port_rule_match.groups()
+                data = self.read_json()
+                action = str(data.get("action", "add"))
+                if action == "add":
+                    rules = add_instance_port_rule(
+                        node, name, data.get("protocol", "tcp"),
+                        data.get("host_port"), data.get("guest_port"),
+                    )
+                elif action == "delete":
+                    rules = delete_instance_port_rule(node, name, data.get("rule_id", ""))
+                else:
+                    raise ValueError("端口规则操作无效")
+                self.send_json(200, {"ok": True, "port_rules": rules})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path == "/api/domains":
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                data = self.read_json()
+                route, apply = save_domain_route(
+                    data.get("domain", ""), data.get("node", ""),
+                    data.get("name", ""), data.get("host_port"),
+                )
+                self.send_json(201, {"ok": True, "route": route, "apply": apply})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        domain_delete_match = re.fullmatch(r"/api/domains/([a-f0-9]{16})/delete", path)
+        if domain_delete_match:
+            if auth[1].get("role") != "admin":
+                self.send_json(403, {"error": "需要管理员权限"})
+                return
+            try:
+                data = delete_domain_route(domain_delete_match.group(1))
+                self.send_json(200, {"ok": True, "domains": data})
             except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
             return
@@ -4083,9 +4917,6 @@ class Handler(BaseHTTPRequestHandler):
 
         match = re.fullmatch(r"/api/nodes/([^/]+)/instances/([^/]+)/action", path)
         if match:
-            node = ""
-            name = ""
-            action = "action"
             try:
                 requested_node = match.group(1)
                 name = match.group(2)
@@ -4097,26 +4928,13 @@ class Handler(BaseHTTPRequestHandler):
                 action = str(self.read_json().get("action", ""))
                 if action not in {"start", "stop", "restart"}:
                     raise ValueError("不支持的操作")
-                if action in {"start", "restart"}:
-                    instance = json.loads(
-                        run_incus(
-                            "query", f"{node}:/1.0/instances/{name}?recursion=1", timeout=20
-                        )
-                    )
-                    traffic = traffic_quota_status(node, name, instance.get("config") or {})
-                    if traffic["exceeded"] and traffic["action"] == "stop":
-                        raise ValueError("该实例本月流量已超过配额，请调整配额或重置用量后再启动")
-                args = [action, f"{node}:{name}"]
-                if action in {"stop", "restart"}:
-                    args.append("--force")
-                run_incus(*args, timeout=180)
-                record_operation(f"instance_{action}", name, node)
-                self.send_json(200, {"ok": True})
-            except Exception as exc:
-                record_operation(
-                    f"instance_{action}", name or "未知实例", node,
-                    "failed", str(exc),
+                task = enqueue_task(
+                    "instance_action", f"{action} 实例 {name}", node=node, target=name,
+                    payload={"node": node, "name": name, "action": action},
+                    owner=auth[1]["username"],
                 )
+                self.send_json(202, {"ok": True, "task": task})
+            except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
             return
         self.send_json(404, {"error": "接口不存在"})
@@ -4170,14 +4988,12 @@ class Handler(BaseHTTPRequestHandler):
                 name = instance_match.group(2)
                 if not NAME_RE.fullmatch(name):
                     raise ValueError("实例名称无效")
-                run_incus("delete", f"{node}:{name}", "--force", timeout=180)
-                delete_credentials(node, name)
-                remove_instance_assignments(node, name)
-                remove_traffic_usage(node, name)
-                record_operation("instance_delete", name, node)
-                self.send_json(200, {"ok": True})
+                task = enqueue_task(
+                    "instance_delete", f"删除实例 {name}", node=node, target=name,
+                    payload={"node": node, "name": name}, owner=auth[1]["username"],
+                )
+                self.send_json(202, {"ok": True, "task": task})
             except Exception as exc:
-                record_operation("instance_delete", instance_match.group(2), instance_match.group(1), "failed", str(exc))
                 self.send_json(400, {"error": str(exc)})
             return
         self.send_json(404, {"error": "接口不存在"})
@@ -4197,6 +5013,7 @@ def main():
         do_handshake_on_connect=False,
     )
     threading.Thread(target=monitor_loop, name="notification-monitor", daemon=True).start()
+    threading.Thread(target=backup_scheduler_loop, name="backup-scheduler", daemon=True).start()
     print(f"Incus 中文集群面板正在监听 https://{HOST}:{PORT}", flush=True)
     server.serve_forever()
 

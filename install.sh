@@ -50,6 +50,12 @@ log "安装基础依赖"
 apt-get update
 apt-get install -y ca-certificates curl gnupg openssl python3 jq
 
+if ! command -v caddy >/dev/null 2>&1 && apt-cache show caddy >/dev/null 2>&1; then
+  log "安装可选的 Caddy HTTPS 反向代理"
+  apt-get install -y caddy || warn "Caddy 安装失败，域名规则仍可生成但不会自动生效。"
+  systemctl disable --now caddy.service 2>/dev/null || true
+fi
+
 if ! command -v incus >/dev/null 2>&1; then
   log "添加 Zabbly Incus 稳定版软件源"
   install -d -m 0755 /etc/apt/keyrings
@@ -88,6 +94,7 @@ install -m 0755 "$SCRIPT_DIR/uninstall.sh" /usr/local/sbin/incus-cn-panel-uninst
 install -m 0755 "$SCRIPT_DIR/bootstrap.sh" /usr/local/sbin/incus-cn-panel-bootstrap
 install -m 0755 "$SCRIPT_DIR/update.sh" /usr/local/sbin/incus-cn-panel-update
 install -m 0644 "$SCRIPT_DIR/incus-cn-panel.service" /etc/systemd/system/incus-cn-panel.service
+install -m 0644 "$SCRIPT_DIR/incus-cn-panel-proxy.service" /etc/systemd/system/incus-cn-panel-proxy.service
 
 password_config_rewrite=false
 if [[ -f "$CONFIG_DIR/config.env" && -f /root/incus-cn-panel-credentials.txt && -z ${PANEL_PASSWORD:-} && -z $PANEL_PORT_WAS_SET && -z $PANEL_USER_WAS_SET ]]; then

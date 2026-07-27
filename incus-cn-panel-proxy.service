@@ -1,0 +1,21 @@
+[Unit]
+Description=Incus Control managed HTTPS reverse proxy
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/incus-cn-panel/Caddyfile.routes
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/caddy run --environ --config /var/lib/incus-cn-panel/Caddyfile.routes
+ExecReload=/usr/bin/caddy reload --config /var/lib/incus-cn-panel/Caddyfile.routes --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/incus-cn-panel
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

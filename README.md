@@ -23,6 +23,10 @@
 - 添加宿主机时直接使用填写的公网地址建立信任，并分阶段验证 API、宿主资源、default 存储池和 incusbr0 网络；失败时显示原因、原始诊断和排查建议
 - 宿主机接入后生成体检报告，核对 Incus 版本、CPU、内存、default 存储池、incusbr0 和 KVM 能力，并给出阻断项与修复建议
 - 持久化任务中心异步执行单台与批量创建，展示阶段、进度和失败原因；支持取消、失败重试和服务重启后的中断恢复
+- 实例生命周期管理支持快照创建/回滚/删除、跨宿主机迁移、系统重装和带输出限制的命令控制台
+- 将实例完整导出到控制端并恢复，支持每天或每周自动备份和 1-30 份保留策略
+- 为实例添加独立 TCP/UDP 端口转发，端口冲突检查同时覆盖 SSH、连续端口段和 Incus proxy 设备
+- 将域名绑定到实例 TCP 端口并生成 Caddy 自动 HTTPS 配置；独立托管 Caddy 与系统已有 Caddy 互不覆盖
 - 服务端资源调度器提供稳定、均衡和高密度策略，统一计算标准内存/磁盘档位、CPU 安全预算、Swap 与创建上限
 - 每 10 分钟核对 Incus 实际实例与控制端 SSH 凭据、流量计数和用户授权，管理员可从任务中心清理孤立记录
 - 宿主机使用组合监控板显示运行健康、架构、负载、CPU 安全预算、内存、存储池、实例状态和端口容量
@@ -115,7 +119,7 @@ LXC 的“最多并行 vCPU”控制实例可以同时使用多少个 CPU 线程
 
 CPU 采用严格不超配预算。以 4 核宿主机为例，面板保留 15% 即 0.6 核给宿主系统，实例安全池为 3.4 核。若现有实例已经承诺 1.5 核，那么还能分配 1.9 核；新建两台 LXC 时每台最多分配 0.95 核持续算力。前端会立即提示超额，后端在真正创建前还会再次校验，所以即使所有实例同时达到上限，合计也不会超过安全池。未设置 CPU 上限的外部实例按宿主机全部核心保守计账，避免未知负载被错误当作 0。这里保证的是面板管理实例的 CPU 上限不超配；宿主机上面板之外的进程仍需由管理员控制。
 
-操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，管理员密码哈希保存在 `/var/lib/incus-cn-panel/password.env`，实例 SSH 凭据保存在 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，任务、宿主机体检和状态核对分别保存在 `tasks.json`、`node-health.json` 与 `reconcile-status.json`，版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`。这些敏感文件权限均为 `0600`，再次运行控制端安装命令会原地升级并保留数据。
+操作日志保存在控制端的 `/var/lib/incus-cn-panel/operations.jsonl`，管理员密码哈希保存在 `/var/lib/incus-cn-panel/password.env`，实例 SSH 凭据保存在 `/var/lib/incus-cn-panel/credentials.json`，普通账户、密码哈希和限时授权保存在 `/var/lib/incus-cn-panel/users.json`。异常规则和 Telegram 凭据保存在 `/var/lib/incus-cn-panel/notification-config.json`，通知事件和巡检快照保存在 `/var/lib/incus-cn-panel/notifications.json`，实例月流量计数保存在 `/var/lib/incus-cn-panel/traffic-usage.json`，任务、宿主机体检和状态核对分别保存在 `tasks.json`、`node-health.json` 与 `reconcile-status.json`。实例导出备份位于 `backups/`，备份策略和域名路由分别保存在 `backups.json` 与 `domain-routes.json`，生成的 Caddy 配置为 `Caddyfile.routes`。版本更新状态保存在 `/var/lib/incus-cn-panel/update-status.json`。这些敏感文件权限均为 `0600`，再次运行控制端安装命令会原地升级并保留数据。
 
 宿主机实时监控只在管理员打开“宿主机”页面时查询，离开页面后自动停止。内存、存储池和 1 分钟负载来自 Incus 宿主机资源接口；“实例 CPU”“实例上传”“实例下载”由该宿主机上全部实例的累计计数器差分计算，不包含 Incus 服务、SSH 等宿主机系统进程自身的 CPU 与管理流量。
 
@@ -159,7 +163,7 @@ sudo bash /tmp/uninstall-incus-node.sh
 
 ## 边界
 
-这个项目目前不包含计费、租户自助购买、IP 地址池、工单和滥用控制。实例创建已经通过持久化任务中心异步执行；其他耗时生命周期操作将逐步迁移到同一任务系统。
+这个项目目前不包含计费、租户自助购买、IP 地址池、工单和滥用控制。实例创建、生命周期、快照、备份、迁移和重装均通过持久化任务中心执行。控制端备份适合单机恢复；异地对象存储复制仍需管理员另外配置。
 
 没有额外公网 IP 时，实例默认通过 NAT 共享宿主机出口。公共目录使用 Incus 默认的 [`images:` simplestreams 服务](https://images.linuxcontainers.org/)，当前提供 Alpine、Debian、Ubuntu、AlmaLinux 和 Rocky Linux 的精选入口；首次创建会自动下载并缓存在目标宿主机。面板会通过 `apk`、`apt`、`dnf` 或 `yum` 自动安装并启动 OpenSSH。
 

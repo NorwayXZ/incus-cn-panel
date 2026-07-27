@@ -22,13 +22,13 @@ import app  # noqa: E402
 
 class ValidationTests(unittest.TestCase):
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "1.7.0")
+        self.assertEqual(app.APP_VERSION, "1.8.0")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"1.8.0\n"
+        response.read.return_value = b"1.9.0\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "1.8.0")
+            self.assertEqual(app.fetch_latest_version(), "1.9.0")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -37,10 +37,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "1.8.0",
+            "status": "running", "target_version": "1.9.0",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "1.8.0")
+        self.assertEqual(payload["latest_version"], "1.9.0")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -56,7 +56,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("1.8.0")
+                    status = app.start_panel_update("1.9.0")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -64,7 +64,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "1.8.0")
+                self.assertEqual(saved["target_version"], "1.9.0")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -115,7 +115,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "1.7.0")
+                self.assertEqual(data["panel_version"], "1.8.0")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -171,7 +171,7 @@ class ValidationTests(unittest.TestCase):
             installer = source_file.read()
         with open(os.path.join(root, "uninstall.sh"), encoding="utf-8") as source_file:
             uninstaller = source_file.read()
-        for value in ("VERSION", "incus-cn-panel-bootstrap", "incus-cn-panel-update"):
+        for value in ("VERSION", "incus-cn-panel-bootstrap", "incus-cn-panel-update", "incus-cn-panel-proxy.service"):
             self.assertIn(value, installer)
         self.assertIn("static/login-datacenter.webp", installer)
         for value in ("password.env", "password_config_rewrite=false", "chmod 0600"):
@@ -901,8 +901,10 @@ class ValidationTests(unittest.TestCase):
                      mock.patch("app.require_node", return_value="node-a"), \
                      mock.patch("app.instance_credentials", return_value={"username": "root"}), \
                      mock.patch("app.record_operation"), \
+                     mock.patch("app.enqueue_task", return_value={
+                         "id": "0123456789abcdef", "status": "queued",
+                     }) as enqueue_task, \
                      mock.patch("app.run_incus") as run_incus:
-                    run_incus.side_effect = [json.dumps({"config": {}}), None]
                     self.assertEqual(request("GET", "/api/users")[0], 403)
                     self.assertEqual(request("GET", "/api/notifications")[0], 403)
                     self.assertEqual(request("GET", "/api/system/version?refresh=1")[0], 403)
@@ -928,13 +930,9 @@ class ValidationTests(unittest.TestCase):
                         "POST",
                         "/api/nodes/node-a/instances/web-01/action",
                         {"action": "restart"},
-                    )[0], 200)
-                    self.assertEqual(run_incus.call_args_list, [
-                        mock.call(
-                            "query", "node-a:/1.0/instances/web-01?recursion=1", timeout=20,
-                        ),
-                        mock.call("restart", "node-a:web-01", "--force", timeout=180),
-                    ])
+                    )[0], 202)
+                    enqueue_task.assert_called_once()
+                    run_incus.assert_not_called()
 
                     past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
                     app.update_user_account("customer-03", assignments=[
@@ -975,6 +973,10 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("renderTasks", app.HTML)
         self.assertIn('id="resourceStrategy"', app.HTML)
         self.assertIn("状态一致性", app.HTML)
+        self.assertIn("备份与网络", app.HTML)
+        self.assertIn("生命周期管理", app.HTML)
+        self.assertIn("独立端口转发", app.HTML)
+        self.assertIn("命令控制台", app.HTML)
         self.assertIn("月流量配额", app.HTML)
         self.assertIn('id="applySmartPlan"', app.HTML)
         self.assertIn('id="smartPlanText"', app.HTML)
@@ -1241,6 +1243,89 @@ class ValidationTests(unittest.TestCase):
                 app.DATA_DIR, app.CREDENTIALS_FILE, app.TRAFFIC_FILE,
                 app.USERS_FILE, app.RECONCILE_FILE,
             ) = old_values
+
+    def test_snapshot_lifecycle_uses_incus_snapshot_commands(self):
+        with mock.patch("app.require_node", return_value="node-a"), \
+             mock.patch("app.run_incus", side_effect=[None, "[]", json.dumps({"status": "Stopped"}), None, None]) as run:
+            self.assertEqual(app.create_snapshot("node-a", "web-01", "before-upgrade"), [])
+            app.restore_snapshot("node-a", "web-01", "before-upgrade")
+            app.delete_snapshot("node-a", "web-01", "before-upgrade")
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call("snapshot", "create", "node-a:web-01", "before-upgrade", timeout=600),
+                mock.call("snapshot", "list", "node-a:web-01", "--format=json", timeout=30),
+                mock.call("query", "node-a:/1.0/instances/web-01?recursion=1", timeout=30),
+                mock.call("snapshot", "restore", "node-a:web-01", "before-upgrade", timeout=900),
+                mock.call("snapshot", "delete", "node-a:web-01", "before-upgrade", timeout=300),
+            ],
+        )
+
+    def test_instance_backup_is_private_persistent_and_deletable(self):
+        old_values = (app.DATA_DIR, app.BACKUPS_FILE, app.BACKUP_DIR)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.BACKUPS_FILE = os.path.join(directory, "backups.json")
+                app.BACKUP_DIR = os.path.join(directory, "backups")
+
+                def export(*args, **_kwargs):
+                    os.makedirs(app.BACKUP_DIR, exist_ok=True)
+                    with open(args[2], "wb") as handle:
+                        handle.write(b"backup-data")
+                    return ""
+
+                with mock.patch("app.require_node", return_value="node-a"), \
+                     mock.patch("app.run_incus", side_effect=export):
+                    record = app.create_instance_backup("node-a", "web-01")
+                self.assertRegex(record["id"], r"^[a-f0-9]{16}$")
+                saved = app.public_backups()["backups"]
+                self.assertEqual(saved[0]["size"], len(b"backup-data"))
+                self.assertEqual(os.stat(os.path.join(
+                    app.BACKUP_DIR, f"{record['id']}.tar.gz",
+                )).st_mode & 0o777, 0o600)
+                app.delete_instance_backup(record["id"])
+                self.assertEqual(app.public_backups()["backups"], [])
+        finally:
+            app.DATA_DIR, app.BACKUPS_FILE, app.BACKUP_DIR = old_values
+
+    def test_proxy_devices_are_included_in_host_port_conflicts(self):
+        occupied = app.occupied_host_ports([{
+            "expanded_devices": {
+                "ssh": {"type": "proxy", "listen": "tcp:0.0.0.0:22001"},
+                "web": {"type": "proxy", "listen": "tcp:0.0.0.0:18080-18082"},
+                "dns": {"type": "proxy", "listen": "udp:0.0.0.0:15353"},
+            },
+        }])
+        self.assertTrue({22001, 18080, 18081, 18082, 15353}.issubset(occupied))
+
+    def test_domain_route_generates_caddy_config_without_overwriting_existing_caddy(self):
+        old_values = (
+            app.DATA_DIR, app.DOMAINS_FILE, app.CADDY_ROUTES_FILE,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                app.DATA_DIR = directory
+                app.DOMAINS_FILE = os.path.join(directory, "domains.json")
+                app.CADDY_ROUTES_FILE = os.path.join(directory, "Caddyfile.routes")
+                instance = {"expanded_devices": {
+                    "web": {"type": "proxy", "listen": "tcp:0.0.0.0:18080"},
+                }}
+                with mock.patch("app.require_node", return_value="node-a"), \
+                     mock.patch("app.node_host", return_value="203.0.113.10"), \
+                     mock.patch("app.run_incus", return_value=json.dumps(instance)), \
+                     mock.patch("app.shutil.which", return_value=None):
+                    route, apply = app.save_domain_route(
+                        "app.example.com", "node-a", "web-01", 18080,
+                    )
+                self.assertEqual(route["target_host"], "203.0.113.10")
+                self.assertEqual(apply["status"], "pending")
+                with open(app.CADDY_ROUTES_FILE, encoding="utf-8") as handle:
+                    caddyfile = handle.read()
+                self.assertIn("app.example.com", caddyfile)
+                self.assertIn("reverse_proxy 203.0.113.10:18080", caddyfile)
+        finally:
+            app.DATA_DIR, app.DOMAINS_FILE, app.CADDY_ROUTES_FILE = old_values
 
     def test_parse_instances_includes_resource_and_access_metadata(self):
         instances = app.parse_instances("node-hk-01", [{
