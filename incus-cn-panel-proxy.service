@@ -1,5 +1,5 @@
 [Unit]
-Description=WhySoQuiet managed HTTPS reverse proxy
+Description=CloudNest managed HTTPS reverse proxy
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/var/lib/incus-cn-panel/Caddyfile.routes

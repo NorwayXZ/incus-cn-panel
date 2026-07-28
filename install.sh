@@ -11,7 +11,7 @@ PANEL_PORT=${PANEL_PORT:-8443}
 PANEL_USER=${PANEL_USER:-admin}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-log() { printf '\033[1;32m[WhySoQuiet]\033[0m %s\n' "$*"; }
+log() { printf '\033[1;32m[CloudNest]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[警告]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m[错误]\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -183,7 +183,7 @@ systemctl is-active --quiet incus-cn-panel.service || {
 }
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
-  ufw allow "${PANEL_PORT}/tcp" comment 'WhySoQuiet Panel'
+  ufw allow "${PANEL_PORT}/tcp" comment 'CloudNest Panel'
 fi
 
 log "安装完成"
