@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPOSITORY=${INCUS_CN_REPOSITORY:-NorwayXZ/incus-cn-panel}
-BRANCH=${INCUS_CN_BRANCH:-main}
+REPOSITORY=${CLOUDNEST_REPOSITORY:-${INCUS_CN_REPOSITORY:-NorwayXZ/CloudNest}}
+BRANCH=${CLOUDNEST_BRANCH:-${INCUS_CN_BRANCH:-main}}
 command -v curl >/dev/null 2>&1 || { echo "缺少 curl 命令。" >&2; exit 1; }
 command -v tar >/dev/null 2>&1 || { echo "缺少 tar 命令。" >&2; exit 1; }
 TEMP_DIR=$(mktemp -d)

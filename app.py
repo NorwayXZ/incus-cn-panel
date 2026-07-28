@@ -57,9 +57,9 @@ RECONCILE_FILE = os.path.join(DATA_DIR, "reconcile-status.json")
 UPDATER_PATH = os.environ.get("PANEL_UPDATER_PATH", "/usr/local/sbin/incus-cn-panel-update")
 UPDATE_VERSION_URL = os.environ.get(
     "PANEL_UPDATE_VERSION_URL",
-    "https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/VERSION",
+    "https://raw.githubusercontent.com/NorwayXZ/CloudNest/main/VERSION",
 )
-UPDATE_REPOSITORY_URL = "https://github.com/NorwayXZ/incus-cn-panel"
+UPDATE_REPOSITORY_URL = "https://github.com/NorwayXZ/CloudNest"
 SESSIONS = {}
 LOGIN_ATTEMPTS = {}
 REMOTE_CONFIG_LOCK = threading.Lock()

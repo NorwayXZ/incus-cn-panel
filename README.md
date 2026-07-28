@@ -90,13 +90,13 @@ CloudNest 是 WhySoQuiet 开发的轻量多节点虚拟化控制面板，底层�
 ## 安装控制端
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootstrap.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/NorwayXZ/CloudNest/main/bootstrap.sh | sudo bash
 ```
 
 可以指定面板账号、密码和端口：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootstrap.sh \
+curl -fsSL https://raw.githubusercontent.com/NorwayXZ/CloudNest/main/bootstrap.sh \
   | sudo env PANEL_USER=admin PANEL_PASSWORD='请设置至少6位的强密码' PANEL_PORT=8443 bash
 ```
 
@@ -109,7 +109,7 @@ curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootst
 在每台计算节点执行。建议设置控制端公网 IP，这样脚本在 UFW 已启用时只向控制端放行 `8443`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/bootstrap-node.sh \
+curl -fsSL https://raw.githubusercontent.com/NorwayXZ/CloudNest/main/bootstrap-node.sh \
   | sudo env CONTROLLER_IP=203.0.113.10 TRUST_NAME=incus-cn-panel bash
 ```
 
@@ -167,7 +167,7 @@ sudo incus-cn-node-uninstall
 如果节点安装中途失败、尚未生成上述卸载命令，可以直接下载同一份清理脚本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NorwayXZ/incus-cn-panel/main/uninstall-node.sh \
+curl -fsSL https://raw.githubusercontent.com/NorwayXZ/CloudNest/main/uninstall-node.sh \
   -o /tmp/uninstall-incus-node.sh
 sudo bash /tmp/uninstall-incus-node.sh
 ```

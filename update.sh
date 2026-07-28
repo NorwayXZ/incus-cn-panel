@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPOSITORY=${INCUS_CN_REPOSITORY:-NorwayXZ/incus-cn-panel}
-BRANCH=${INCUS_CN_BRANCH:-main}
+REPOSITORY=${CLOUDNEST_REPOSITORY:-${INCUS_CN_REPOSITORY:-NorwayXZ/CloudNest}}
+BRANCH=${CLOUDNEST_BRANCH:-${INCUS_CN_BRANCH:-main}}
 APP_DIR=/opt/incus-cn-panel
 DATA_DIR=/var/lib/incus-cn-panel
 STATUS_FILE=${DATA_DIR}/update-status.json
@@ -38,7 +38,9 @@ fi
 
 write_status running "正在下载并安装新版本" "$current_version" "$target_version"
 install -m 0600 /dev/null "$LOG_FILE"
-if INCUS_CN_REPOSITORY="$REPOSITORY" INCUS_CN_BRANCH="$BRANCH" "$BOOTSTRAP" > "$LOG_FILE" 2>&1; then
+if CLOUDNEST_REPOSITORY="$REPOSITORY" CLOUDNEST_BRANCH="$BRANCH" \
+   INCUS_CN_REPOSITORY="$REPOSITORY" INCUS_CN_BRANCH="$BRANCH" \
+   "$BOOTSTRAP" > "$LOG_FILE" 2>&1; then
   installed_version=$(tr -d '[:space:]' < "$APP_DIR/VERSION" 2>/dev/null || printf '%s' "$target_version")
   write_status complete "版本更新完成，请重新登录" "$installed_version" "$target_version"
 else
