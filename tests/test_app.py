@@ -36,13 +36,13 @@ class ValidationTests(unittest.TestCase):
             self.assertIn(marker, page)
 
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "2.6.3")
+        self.assertEqual(app.APP_VERSION, "2.6.4")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"2.6.4\n"
+        response.read.return_value = b"2.6.5\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "2.6.4")
+            self.assertEqual(app.fetch_latest_version(), "2.6.5")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(
             urlopen.call_args.args[0].full_url,
@@ -57,10 +57,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "2.6.4",
+            "status": "running", "target_version": "2.6.5",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "2.6.4")
+        self.assertEqual(payload["latest_version"], "2.6.5")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -76,7 +76,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("2.6.4")
+                    status = app.start_panel_update("2.6.5")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -84,7 +84,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "2.6.4")
+                self.assertEqual(saved["target_version"], "2.6.5")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -135,7 +135,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "2.6.3")
+                self.assertEqual(data["panel_version"], "2.6.4")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -180,8 +180,11 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("ensure_host_swap", source)
         self.assertIn("/var/lib/incus-host.swap", source)
         self.assertIn("swapoff /var/lib/incus-host.swap", uninstaller)
+        for command in ("cloudnest-node-uninstall", "incus-cn-node-uninstall"):
+            self.assertIn(f"/usr/local/sbin/{command}", source)
+            self.assertIn(f"/usr/local/sbin/{command}", uninstaller)
         self.assertLess(
-            source.index("/usr/local/sbin/incus-cn-node-uninstall"),
+            source.index("/usr/local/sbin/cloudnest-node-uninstall"),
             source.index("apt-get update"),
         )
 
@@ -196,6 +199,9 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("static/login-datacenter.webp", installer)
         for value in ("password.env", "password_config_rewrite=false", "chmod 0600"):
             self.assertIn(value, installer)
+        for command in ("cloudnest-uninstall", "incus-cn-panel-uninstall"):
+            self.assertIn(f"/usr/local/sbin/{command}", installer)
+            self.assertIn(f"/usr/local/sbin/{command}", uninstaller)
         self.assertIn("incus-cn-panel-update", uninstaller)
 
     def test_bootstrap_scripts_use_cloudnest_repository_with_legacy_overrides(self):

@@ -68,6 +68,7 @@ ensure_host_swap() {
 }
 
 if [[ -f "$SCRIPT_DIR/uninstall-node.sh" ]]; then
+  install -m 0755 "$SCRIPT_DIR/uninstall-node.sh" /usr/local/sbin/cloudnest-node-uninstall
   install -m 0755 "$SCRIPT_DIR/uninstall-node.sh" /usr/local/sbin/incus-cn-node-uninstall
 fi
 

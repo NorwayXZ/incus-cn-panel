@@ -155,21 +155,23 @@ curl -H 'Authorization: Bearer icp_只显示一次的Token' \
 卸载控制端，不触碰任何计算节点或实例：
 
 ```bash
-sudo incus-cn-panel-uninstall
+sudo cloudnest-uninstall
 ```
 
 彻底卸载一台计算节点及其全部实例和 Incus 数据：
 
 ```bash
-sudo incus-cn-node-uninstall
+sudo cloudnest-node-uninstall
 ```
+
+从旧版本升级的服务器仍可使用 `incus-cn-panel-uninstall` 和 `incus-cn-node-uninstall`，新旧命令执行相同的清理脚本。
 
 如果节点安装中途失败、尚未生成上述卸载命令，可以直接下载同一份清理脚本：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NorwayXZ/CloudNest/main/uninstall-node.sh \
-  -o /tmp/uninstall-incus-node.sh
-sudo bash /tmp/uninstall-incus-node.sh
+  -o /tmp/cloudnest-uninstall-node.sh
+sudo bash /tmp/cloudnest-uninstall-node.sh
 ```
 
 节点卸载会要求输入 `PURGE-NODE` 二次确认。该操作不可恢复。若只想断开节点，直接在面板点击“移除”，不要运行节点卸载命令。

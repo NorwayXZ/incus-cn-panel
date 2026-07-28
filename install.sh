@@ -90,6 +90,7 @@ install -m 0644 "$SCRIPT_DIR/VERSION" "$APP_DIR/VERSION"
 install -m 0644 "$SCRIPT_DIR/static/index.html" "$APP_DIR/static/index.html"
 install -m 0644 "$SCRIPT_DIR/static/lucide.min.js" "$APP_DIR/static/lucide.min.js"
 install -m 0644 "$SCRIPT_DIR/static/login-datacenter.webp" "$APP_DIR/static/login-datacenter.webp"
+install -m 0755 "$SCRIPT_DIR/uninstall.sh" /usr/local/sbin/cloudnest-uninstall
 install -m 0755 "$SCRIPT_DIR/uninstall.sh" /usr/local/sbin/incus-cn-panel-uninstall
 install -m 0755 "$SCRIPT_DIR/bootstrap.sh" /usr/local/sbin/incus-cn-panel-bootstrap
 install -m 0755 "$SCRIPT_DIR/update.sh" /usr/local/sbin/incus-cn-panel-update

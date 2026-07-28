@@ -45,7 +45,8 @@ fi
 ip link delete incusbr0 2>/dev/null || true
 rm -rf /var/lib/incus /var/cache/incus /var/log/incus /run/incus /etc/incus
 rm -rf /root/.cache/incus /root/.config/incus
-rm -f /root/incus-node-token.txt /usr/local/sbin/incus-cn-node-uninstall
+rm -f /root/incus-node-token.txt
+rm -f /usr/local/sbin/cloudnest-node-uninstall /usr/local/sbin/incus-cn-node-uninstall
 rm -f /etc/apt/sources.list.d/zabbly-incus-stable.sources /etc/apt/keyrings/zabbly.asc
 DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y
 hash -r

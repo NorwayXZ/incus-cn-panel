@@ -13,7 +13,7 @@ rm -f /etc/systemd/system/incus-cn-panel.service
 rm -f /etc/systemd/system/incus-cn-panel-proxy.service
 rm -rf /opt/incus-cn-panel /etc/incus-cn-panel /var/lib/incus-cn-panel
 rm -f /root/incus-cn-panel-credentials.txt
-rm -f /usr/local/sbin/incus-cn-panel-uninstall
+rm -f /usr/local/sbin/cloudnest-uninstall /usr/local/sbin/incus-cn-panel-uninstall
 rm -f /usr/local/sbin/incus-cn-panel-bootstrap /usr/local/sbin/incus-cn-panel-update
 systemctl daemon-reload
 echo "中文控制面板及其客户端证书已卸载；远程计算节点和实例均未改动。"
