@@ -36,13 +36,13 @@ class ValidationTests(unittest.TestCase):
             self.assertIn(marker, page)
 
     def test_panel_version_and_remote_update_check(self):
-        self.assertEqual(app.APP_VERSION, "2.6.1")
+        self.assertEqual(app.APP_VERSION, "2.6.2")
         self.assertLess(app.version_tuple("1.6.4"), app.version_tuple("1.7.0"))
         response = mock.MagicMock()
-        response.read.return_value = b"2.6.2\n"
+        response.read.return_value = b"2.6.3\n"
         response.__enter__.return_value = response
         with mock.patch("app.urlopen", return_value=response) as urlopen:
-            self.assertEqual(app.fetch_latest_version(), "2.6.2")
+            self.assertEqual(app.fetch_latest_version(), "2.6.3")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
         self.assertEqual(urlopen.call_args.args[0].full_url, app.UPDATE_VERSION_URL)
 
@@ -51,10 +51,10 @@ class ValidationTests(unittest.TestCase):
             app.fetch_latest_version()
 
         with mock.patch("app.read_update_status", return_value={
-            "status": "running", "target_version": "2.6.2",
+            "status": "running", "target_version": "2.6.3",
         }):
             payload = app.panel_version_payload(refresh=False)
-        self.assertEqual(payload["latest_version"], "2.6.2")
+        self.assertEqual(payload["latest_version"], "2.6.3")
         self.assertTrue(payload["update_available"])
 
     def test_panel_update_starts_fixed_systemd_updater(self):
@@ -70,7 +70,7 @@ class ValidationTests(unittest.TestCase):
                 app.UPDATER_PATH = updater
                 completed = mock.Mock(returncode=0, stdout="", stderr="")
                 with mock.patch("app.subprocess.run", return_value=completed) as run:
-                    status = app.start_panel_update("2.6.2")
+                    status = app.start_panel_update("2.6.3")
                 self.assertEqual(status["status"], "queued")
                 command = run.call_args.args[0]
                 self.assertEqual(command[0:3], ["systemd-run", "--quiet", "--collect"])
@@ -78,7 +78,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertRegex(command[3], r"^--unit=incus-cn-panel-update-[0-9]+$")
                 with open(app.UPDATE_STATUS_FILE, encoding="utf-8") as handle:
                     saved = json.load(handle)
-                self.assertEqual(saved["target_version"], "2.6.2")
+                self.assertEqual(saved["target_version"], "2.6.3")
         finally:
             app.DATA_DIR, app.UPDATE_STATUS_FILE, app.UPDATER_PATH = old_values
 
@@ -129,7 +129,7 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(data["account"], {"username": "admin", "role": "admin"})
                 self.assertEqual(data["csrf"], "csrf-token")
-                self.assertEqual(data["panel_version"], "2.6.1")
+                self.assertEqual(data["panel_version"], "2.6.2")
                 status, data = request("GET", "/api/system/version?refresh=1")
                 self.assertEqual(status, 200)
                 self.assertTrue(data["update_available"])
@@ -1140,7 +1140,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_chinese_ui_and_relative_api_base(self):
         self.assertIn("CloudNest", app.HTML)
-        self.assertIn("WhySoQuiet", app.HTML)
+        self.assertIn("Powered by <b>WhySoQuiet</b>", app.HTML)
         self.assertNotIn("Incus Control", app.HTML)
         self.assertIn('id="toggleLoginPassword"', app.HTML)
         self.assertIn('id="loginSubmit"', app.HTML)

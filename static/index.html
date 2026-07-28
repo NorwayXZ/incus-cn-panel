@@ -442,9 +442,10 @@
     .topbar { height:68px; padding:0 24px; background:var(--paper); border-bottom:1px solid var(--line); box-shadow:0 1px 0 rgba(30,19,51,.03); }
     .topbar::after { content:""; position:absolute; right:0; bottom:-1px; left:0; height:2px; background:var(--gold); opacity:.72; }
     .brand { gap:10px; color:var(--ink); font-family:var(--display-font); font-size:19px; font-weight:600; }
-    .top-brand-copy { display:grid; gap:0; line-height:1.05; }
-    .top-brand-copy small { color:var(--gold); font:9px/1.2 var(--mono-font); }
-    .top-brand-copy strong { font-family:var(--display-font); font-size:18px; font-weight:600; }
+    .top-brand-copy { display:grid; gap:1px; line-height:1.05; }
+    .powered-by { color:var(--muted); font-family:Inter,system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; font-size:13px; font-weight:600; line-height:1.25; }
+    .powered-by b { color:var(--gold); font-weight:750; }
+    .top-brand-copy strong { font-family:var(--display-font); font-size:19px; font-weight:600; }
     .connection { color:var(--muted); font-family:var(--mono-font); font-size:11px; }
     .connection-dot { background:var(--coral); box-shadow:0 0 0 3px rgba(239,106,82,.13); }
     .sidebar { top:68px; width:238px; padding:20px 12px 16px; background:var(--ink); border-right:1px solid rgba(201,146,47,.42); }
@@ -629,7 +630,8 @@
     .login-panel { grid-column:1; width:min(480px,100%); min-height:100vh; min-height:100svh; padding:34px 44px 28px; background:transparent; border:0; }
     .login-brand { justify-content:center; }
     .login-brand-copy strong { color:var(--ink); font-family:var(--display-font); font-size:18px; }
-    .login-brand-copy span { color:var(--gold); font-family:var(--mono-font); font-size:9px; }
+    .login-brand-copy .powered-by { color:var(--muted); font-family:Inter,system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; font-size:13px; font-weight:600; }
+    .login-brand-copy .powered-by b { color:var(--gold); font-weight:750; }
     .login-form { max-width:390px; align-self:center; margin:auto; padding:44px 0; }
     .login-form h1 { color:var(--ink); font-family:var(--display-font); font-size:34px; font-weight:600; text-align:center; }
     .login-form > p { color:var(--muted); font-family:var(--mono-font); font-size:11px; text-align:center; }
@@ -742,7 +744,7 @@
     @media (max-width:760px) {
       .topbar { height:60px; padding:0 13px; }
       .topbar .brand span:last-child { font-size:inherit; }
-      .top-brand-copy small { display:none; }
+      .top-brand-copy .powered-by { display:block; font-size:11px; }
       .top-brand-copy strong { font-size:16px; }
       .sidebar { top:auto; right:0; width:auto; height:68px; padding:7px 5px; background:var(--ink); border-top:1px solid rgba(201,146,47,.5); }
       .nav-item { color:#bdb1c8; }
@@ -791,10 +793,10 @@
   </style>
 </head>
 <body>
-  <section id="sessionGate" class="session-gate" aria-live="polite"><div class="session-gate-content"><div class="login-brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span class="login-brand-copy"><strong>CloudNest</strong><span>WhySoQuiet · 虚拟化基础设施控制台</span></span></div><i data-lucide="loader-circle"></i><span>正在检查登录状态</span></div></section>
+  <section id="sessionGate" class="session-gate" aria-live="polite"><div class="session-gate-content"><div class="login-brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span class="login-brand-copy"><strong>CloudNest</strong><span class="powered-by">Powered by <b>WhySoQuiet</b></span></span></div><i data-lucide="loader-circle"></i><span>正在检查登录状态</span></div></section>
   <section id="login" class="login-shell hidden">
     <div class="login-panel">
-      <div class="login-brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span class="login-brand-copy"><strong>CloudNest</strong><span>WhySoQuiet · 虚拟化基础设施控制台</span></span></div>
+      <div class="login-brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span class="login-brand-copy"><strong>CloudNest</strong><span class="powered-by">Powered by <b>WhySoQuiet</b></span></span></div>
       <form id="loginForm" class="login-form">
         <h1>登录 CloudNest</h1>
         <p>管理员与授权用户入口</p>
@@ -804,13 +806,13 @@
         <button id="loginSubmit" class="btn primary login-submit" type="button"><i data-lucide="log-in"></i><span>进入控制台</span></button>
         <div id="loginError" class="login-error hidden" role="alert"><i data-lucide="circle-alert"></i><span id="loginErrorText"></span></div>
       </form>
-      <div class="login-foot"><span><i data-lucide="shield-check"></i>TLS 安全连接</span><span>WhySoQuiet</span></div>
+      <div class="login-foot"><span><i data-lucide="shield-check"></i>TLS 安全连接</span><span>Powered by WhySoQuiet</span></div>
     </div>
   </section>
 
   <section id="app" class="hidden">
     <header class="topbar">
-      <div class="brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span class="top-brand-copy"><small>WHYSOQUIET</small><strong>CloudNest</strong></span></div>
+      <div class="brand"><span class="brand-mark"><i data-lucide="boxes"></i></span><span class="top-brand-copy"><span class="powered-by">Powered by <b>WhySoQuiet</b></span><strong>CloudNest</strong></span></div>
       <div class="top-actions"><span class="connection"><span class="connection-dot"></span><span id="onlineLabel">控制端在线</span></span><button id="openAdminAccount" class="btn small account-button" type="button" title="账户密码与二次验证"><i data-lucide="shield-check"></i><span>账户安全</span></button><button id="globalRefresh" class="btn icon" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button><button id="logout" class="btn small" title="退出登录"><i data-lucide="log-out"></i><span>退出</span></button></div>
     </header>
     <aside class="sidebar">
